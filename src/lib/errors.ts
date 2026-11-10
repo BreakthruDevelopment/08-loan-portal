@@ -3,6 +3,8 @@ export class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Sent as a Retry-After header when set (429 and 503). */
+    readonly retryAfterSeconds?: number,
   ) {
     super(message);
     this.name = new.target.name;
@@ -36,8 +38,22 @@ export class PayloadTooLargeError extends HttpError {
 
 /** Too many attempts in a window (for example share attempts per hour). */
 export class TooManyRequestsError extends HttpError {
-  constructor(message = "Too many requests") {
-    super(429, message);
+  constructor(message = "Too many requests", retryAfterSeconds?: number) {
+    super(429, message, retryAfterSeconds);
+  }
+}
+
+/** The process is at a concurrency limit; try again shortly. */
+export class ServiceBusyError extends HttpError {
+  constructor(message = "The server is busy. Try again shortly.", retryAfterSeconds = 5) {
+    super(503, message, retryAfterSeconds);
+  }
+}
+
+/** The client took too long to send the request body. */
+export class RequestTimeoutError extends HttpError {
+  constructor(message = "The upload took too long.") {
+    super(408, message);
   }
 }
 

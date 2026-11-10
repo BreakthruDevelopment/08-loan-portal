@@ -95,3 +95,28 @@ describe("errorResponse logging (issue #16)", () => {
     spy.mockRestore();
   });
 });
+
+describe("readBodyCapped time limit", () => {
+  it("answers 408 when the whole body doesn't arrive in time, even if it trickles", async () => {
+    const { readBodyCapped } = await import("@/lib/http");
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          await new Promise((r) => setTimeout(r, 40));
+          controller.enqueue(new Uint8Array(1));
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const request = new Request("http://x.test/", { method: "POST", body: stream, duplex: "half" } as RequestInit);
+    const err = await readBodyCapped(request, 1000, { timeoutMs: 150 }).catch((e) => e);
+    expect(errorInfo(err).status).toBe(408);
+  });
+
+  it("sends Retry-After with 429 and 503", async () => {
+    const { ServiceBusyError, TooManyRequestsError } = await import("@/lib/errors");
+    expect(errorResponse(new ServiceBusyError("busy", 7)).headers.get("retry-after")).toBe("7");
+    expect(errorResponse(new TooManyRequestsError("slow", 2)).headers.get("retry-after")).toBe("2");
+    expect(errorResponse(new TooManyRequestsError("slow")).headers.get("retry-after")).toBeNull();
+  });
+});

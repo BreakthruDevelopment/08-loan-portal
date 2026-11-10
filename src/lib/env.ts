@@ -30,6 +30,8 @@ const schema = z.object({
   // App-wide cap on risk summaries per UTC day (a model call each when a live provider is set).
   RISK_DAILY_CAP: z.coerce.number().int().min(1).max(10000).default(200),
   // App-wide document bytes cap. The spec's free-tier ceiling is 2,048 MB.
+  // Total time allowed for an upload body to arrive. Slow senders are cut off (408).
+  UPLOAD_READ_TIMEOUT_MS: z.coerce.number().int().min(50).max(120000).default(30000),
   DOC_STORAGE_CAP_MB: z.coerce.number().int().positive().max(2048).default(2048),
 });
 
