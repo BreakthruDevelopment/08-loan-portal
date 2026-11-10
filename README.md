@@ -9,8 +9,8 @@ This is a demo. Don't enter real financial information or upload real documents.
 Applicants create and edit their own drafts, attach documents, and submit. Underwriters work a queue of
 submitted applications: claim, request information, and approve or decline with reason codes. Admins
 grant the underwriter role, read counts and storage, and verify the audit chain. They never see
-application contents. The risk summary is a later issue. A full write-up of the state machine, the vault,
-and fair-lending rules is too.
+application contents. Underwriters also get deterministic risk rules and an advisory AI summary (see "Risk rules
+and AI risk summary"). A full write-up of the state machine, the vault and the fair-lending rules is a later issue.
 
 ## Architecture
 
@@ -137,3 +137,57 @@ HNSW limit). Limits: 32 texts per call, 8,000 characters each, 64,000 in total (
   `demo: true` and the demo model name so vector spaces are never mixed.
 - `AI_TIMEOUT_MS` (default 20000, max 22000) bounds every provider call, `generate()` and `embed()` alike.
 - Logs carry task, provider, model, count and latency, never the text.
+
+## Risk rules and AI risk summary
+
+**Rules first, model second.** `src/lib/risk-rules.ts` computes the metrics and flags with plain arithmetic: no
+model, no database, so Oracle (no Gemini key) shows correct reasons. Metrics: monthly income, the estimated new
+payment (amortization at a fixed demo APR per credit band: 9.9 / 14.9 / 21.9 / 29.9 percent, 24.9 for unknown),
+DTI including that payment, loan-to-annual-income, months employed and documents by kind. Flags, each with a
+reason built from the numbers and the rule as written: `DTI_HIGH` (over 43%), `DTI_ELEVATED` (36 to 43%),
+`LTI_HIGH` (over 35%), `SHORT_EMPLOYMENT` (under 12 months, employed or self-employed), `NO_EMPLOYMENT_INCOME`,
+`MISSING_INCOME_DOC`, `CREDIT_BAND_POOR`, `INCOME_UNVERIFIED` (always: documents aren't read). Ratios are rounded
+to one decimal and the thresholds use the rounded value.
+
+**The AI summary only explains the flags.** It never decides, and the decide action never reads it. It is shown to
+underwriters only (applicants and admins get 404). The model (`generate()`, task `loan-risk-summary`) receives
+only `<metrics>` and `<flags>` JSON (numbers, enums, flag codes; at most 3,000 characters). Names, employer,
+notes, filenames and document contents are never inputs, so applicant free text can't reach the prompt.
+`src/lib/risk-guardrails.ts` then drops concerns for flags the rules didn't raise, replaces any number that isn't
+a computed one with the rule's reason (numbers are checked by unit: percents and decimals against DTI, LTI, APR and
+the limits, and against the metric named next to them; dollar amounts against income and the new payment; bare
+integers against months, counts and limits), filters decision and prediction language and protected characteristics
+and their proxies (a hit in the summary replaces the whole answer: `mode: "fallback"`, rule reasons only), rejects
+ALL-CAPS codes the rules didn't raise, and drops strengths that name a flagged metric or a metric they don't cite. With `AI_PROVIDER=demo` the recorded fixture goes through the same guardrails.
+
+**Caching and caps.** One summary per version of the application's inputs (`risk_summary`, keyed by a hash of
+the metrics and flags); any change to fields or documents makes the stored one stale and it is not returned.
+Up to 3 regenerations per version, 20 generations per underwriter per hour, `RISK_DAILY_CAP` (default 200) per
+day app-wide. Cached reads use no allowance. Each generation writes a `risk_summary.generated` audit row with
+ids and codes only. Logs carry task, mode, flag codes, guardrail codes and latency, never application data.
+
+### Route contract (`/api/applications/[id]/risk`)
+
+Underwriter session required. Anonymous is 401. Applicants, admins, drafts and unknown ids are 404.
+Mutating calls require a same-origin request.
+
+| Call | Body | Response |
+| --- | --- | --- |
+| `GET` | none | `200 { risk }` from the rules; `risk.summary` is the cached summary or `null`. No model call |
+| `POST` | optional `{ "regenerate": true }` | `200 { risk }` with the cached summary, or a newly generated one |
+
+`risk`: `{ applicationId, applicationVersion, metrics, flags, summary, outdated, unavailable?, disclaimer }`.
+
+- `metrics`: `{ monthlyIncomeCents, newPaymentCents, assumedAprPct, dtiPct | null, ltiPct | null, monthsEmployed, creditBand, documents: { id, pay_stub, bank_statement, tax_return, other } }` (counts).
+- `flags[]`: `{ code, severity: "high" | "medium" | "info", reason, rule, evidence: metric names[] }`. Always shown, with or without a summary.
+- `summary`: `null` or `{ mode: "live" | "demo" | "fallback", provider, generatedAt, regenerationsLeft, data }`, where `data` is `{ summary, strengths[{ text, evidence }], concerns[{ flag, text, evidence }], questionsForApplicant[] }`. Every `concerns[].flag` is one of `flags[].code`; render the rule `reason` and `rule` beside it.
+- `outdated`: a summary exists for an older version of the application; offer "Generate".
+- `unavailable`: the model failed. `summary` is the cached summary when a regeneration failed (with its real `regenerationsLeft`), otherwise the rule reasons only, which aren't stored.
+- `disclaimer`: show it on the panel: "AI summary to assist review. The underwriter makes the decision."
+
+Errors: 409 (regeneration allowance used, or the application changed while generating), 429 (hourly or daily
+limit), 400 (bad body).
+
+**Evals.** `test/ai-evals.test.ts` runs in CI with the model stubbed at the network edge (the real `generate()`
+and guardrails run) and the demo fixture for demo mode. `GEMINI_API_KEY=... pnpm eval:risk` runs the
+answer-quality evals against the live model; it isn't possible on Oracle (no key).
