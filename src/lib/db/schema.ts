@@ -1,4 +1,5 @@
-import { boolean, index, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { boolean, check, date, index, integer, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
 // Auth tables (shape required by Better Auth with the admin plugin).
@@ -84,6 +85,49 @@ export const item = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("item_owner_id_idx").on(t.ownerId)],
+);
+
+// ---------------------------------------------------------------------------
+// Usage limits (src/lib/usage.ts). Kinds are this app's: uploads and risk
+// summaries are per-user windows; risk and demo loads also have a daily cap.
+// Changing a list needs a migration, because the CHECK constraints are schema.
+// ---------------------------------------------------------------------------
+
+export const RATE_KINDS = ["upload", "risk"] as const;
+export const DAILY_USAGE_KINDS = ["risk", "demo_load"] as const;
+
+const list = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
+
+/** App-wide daily counters (one row per UTC day and kind) for free-tier caps. */
+export const dailyUsage = pgTable(
+  "daily_usage",
+  {
+    day: date("day", { mode: "string" }).notNull(),
+    kind: text("kind", { enum: DAILY_USAGE_KINDS }).notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.day, t.kind] }),
+    check("daily_usage_kind_chk", sql`${t.kind} in (${list(DAILY_USAGE_KINDS)})`),
+    check("daily_usage_count_chk", sql`${t.count} >= 0`),
+  ],
+);
+
+/** Per-user rate-limit ledger: one row per attempt, counted over a sliding window. */
+export const rateEvent = pgTable(
+  "rate_event",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: RATE_KINDS }).notNull(),
+    at: timestamp("at", { withTimezone: true, precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("rate_event_user_kind_at_idx").on(t.userId, t.kind, t.at),
+    check("rate_event_kind_chk", sql`${t.kind} in (${list(RATE_KINDS)})`),
+  ],
 );
 
 export type User = typeof user.$inferSelect;
