@@ -1,50 +1,89 @@
 import type { Metadata } from "next";
-import { type Column, DataList, FilterBar, PageIntro, Panel, StatGrid, StatTile, buttonDanger } from "@/components/ui";
+import { type Column, DataList, PageIntro, Panel, StatGrid, StatTile, buttonDanger, buttonPrimary } from "@/components/ui";
 import { requireUserOrRedirect } from "@/lib/auth/session";
-import { listItems } from "@/lib/items";
-import { deleteItemAction } from "./actions";
-import { AddItemForm, SummaryPanel } from "./client";
+import { adminStats } from "@/lib/admin-stats";
+import { listApplications, listQueue } from "@/lib/applications";
+import { createDraftAction, deleteDraftAction } from "./actions";
 
 export const metadata: Metadata = { title: "Dashboard" };
 export const dynamic = "force-dynamic";
 
-type Item = Awaited<ReturnType<typeof listItems>>[number];
+const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 
-const sorts = [
-  { value: "newest", label: "Newest first" },
-  { value: "oldest", label: "Oldest first" },
-  { value: "title", label: "Title A to Z" },
-];
+function formatMoney(cents: number | null) {
+  if (cents === null) return "—";
+  return money.format(cents / 100);
+}
 
-const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) ?? "";
+function formatStatus(status: string) {
+  return status.replaceAll("_", " ");
+}
 
-export default async function DashboardPage({ searchParams }: PageProps<"/dashboard">) {
+export default async function DashboardPage() {
   const user = await requireUserOrRedirect();
-  const all = await listItems(user);
 
-  const sp = await searchParams;
-  const q = one(sp.q).trim().slice(0, 100);
-  const sort = sorts.some((s) => s.value === one(sp.sort)) ? one(sp.sort) : "newest";
-  const view = one(sp.view) === "cards" ? "cards" : "table";
-
-  const items = all
-    .filter((i) => !q || `${i.title} ${i.body}`.toLowerCase().includes(q.toLowerCase()))
-    .sort((a, b) =>
-      sort === "title"
-        ? a.title.localeCompare(b.title)
-        : sort === "oldest"
-          ? a.createdAt.getTime() - b.createdAt.getTime()
-          : b.createdAt.getTime() - a.createdAt.getTime(),
+  if (user.role === "admin") {
+    const stats = await adminStats(user);
+    const open =
+      stats.applicationsByStatus.draft +
+      stats.applicationsByStatus.submitted +
+      stats.applicationsByStatus.in_review +
+      stats.applicationsByStatus.info_requested;
+    return (
+      <>
+        <PageIntro
+          section="Dashboard"
+          title={`Hi, ${user.name}`}
+          description={`Signed in as ${user.email}. Role: admin. Counts only — application contents stay with applicants and underwriters.`}
+        />
+        <StatGrid>
+          <StatTile value={open} label="Open applications" tone="accent" />
+          <StatTile value={stats.documentCount} label="Documents" />
+          <StatTile value={`${Math.round(stats.storageUsedBytes / (1024 * 1024))} MB`} label="Storage used" />
+          <StatTile value={`${Math.round(stats.storageCapBytes / (1024 * 1024))} MB`} label="Storage cap" />
+        </StatGrid>
+      </>
     );
+  }
 
-  const columns: Column<Item>[] = [
-    { key: "title", header: "Item", primary: true, cell: (i) => <span className="font-semibold break-words">{i.title}</span> },
-    { key: "body", header: "Details", cell: (i) => <span className="text-muted break-words">{i.body || "—"}</span> },
+  if (user.role === "underwriter") {
+    const [fresh, mine, decided] = await Promise.all([
+      listQueue(user, "new"),
+      listQueue(user, "mine"),
+      listQueue(user, "decided"),
+    ]);
+    return (
+      <>
+        <PageIntro
+          section="Queue"
+          title={`Hi, ${user.name}`}
+          description="Submitted applications only. Drafts stay with the applicant. The full review desk is a later page."
+        />
+        <StatGrid>
+          <StatTile value={fresh.length} label="New" tone="accent" />
+          <StatTile value={mine.length} label="Mine" />
+          <StatTile value={decided.length} label="Decided" />
+        </StatGrid>
+      </>
+    );
+  }
+
+  const applications = await listApplications(user);
+  type Row = (typeof applications)[number];
+  const columns: Column<Row>[] = [
     {
-      key: "created",
-      header: "Added",
+      key: "status",
+      header: "Status",
+      primary: true,
+      cell: (row) => <span className="font-semibold capitalize">{formatStatus(row.status)}</span>,
+    },
+    { key: "amount", header: "Amount", cell: (row) => formatMoney(row.amountCents) },
+    { key: "purpose", header: "Purpose", cell: (row) => row.purpose?.replaceAll("_", " ") ?? "—" },
+    {
+      key: "updated",
+      header: "Updated",
       className: "whitespace-nowrap",
-      cell: (i) => i.createdAt.toISOString().slice(0, 10),
+      cell: (row) => row.updatedAt.toISOString().slice(0, 10),
     },
     {
       key: "actions",
@@ -52,52 +91,45 @@ export default async function DashboardPage({ searchParams }: PageProps<"/dashbo
       srOnlyHeader: true,
       hideLabel: true,
       className: "text-right",
-      cell: (i) => (
-        <form action={deleteItemAction}>
-          <input type="hidden" name="id" value={i.id} />
-          <button type="submit" className={buttonDanger} aria-label={`Delete ${i.title}`}>
-            Delete
-          </button>
-        </form>
-      ),
+      cell: (row) =>
+        row.status === "draft" ? (
+          <form action={deleteDraftAction}>
+            <input type="hidden" name="id" value={row.id} />
+            <button type="submit" className={buttonDanger}>
+              Delete draft
+            </button>
+          </form>
+        ) : (
+          <span className="text-muted">—</span>
+        ),
     },
   ];
 
   return (
     <>
       <PageIntro
-        section="Dashboard"
+        section="Applications"
         title={`Hi, ${user.name}`}
-        description={`Signed in as ${user.email}. Role: ${user.role}.`}
+        description={`Signed in as ${user.email}. You can have up to 3 open applications.`}
+        actions={
+          <form action={createDraftAction}>
+            <button type="submit" className={buttonPrimary}>
+              Start an application
+            </button>
+          </form>
+        }
       />
-
       <StatGrid>
-        <StatTile value={all.length} label={user.role === "admin" ? "Items (everyone's)" : "Your items"} tone="accent" />
-        <StatTile value={items.length} label="Shown" />
+        <StatTile value={applications.length} label="Your applications" tone="accent" />
+        <StatTile value={applications.filter((row) => row.status === "draft").length} label="Drafts" />
       </StatGrid>
-
-      <Panel title="AI summary">
-        <SummaryPanel />
-      </Panel>
-
-      <Panel title="Add an item">
-        <AddItemForm />
-      </Panel>
-
-      <Panel title={user.role === "admin" ? "All items" : "Your items"} count={all.length}>
-        <FilterBar
-          label="Filter items"
-          search={{ value: q, placeholder: "Search items…" }}
-          sort={{ name: "sort", label: "Sort", value: sort, options: sorts }}
-          view={{ value: view }}
-        />
+      <Panel title="Your applications" count={applications.length}>
         <DataList
-          caption="Items"
-          rows={items}
-          rowKey={(i) => i.id}
+          caption="Your applications"
+          rows={applications}
+          rowKey={(row) => row.id}
           columns={columns}
-          view={view}
-          empty={all.length === 0 ? "Nothing yet. Add your first item above." : "No items match your search."}
+          empty="No applications yet. Start one when you're ready."
         />
       </Panel>
     </>

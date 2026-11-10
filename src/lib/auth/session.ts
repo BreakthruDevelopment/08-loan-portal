@@ -27,10 +27,13 @@ export async function requireUserOrRedirect(): Promise<CurrentUser> {
   return user;
 }
 
-/** For pages: signed-in users without the role go to the dashboard. */
+/**
+ * For pages: the role must match exactly. Admin is not a superset of underwriter,
+ * and an underwriter is not an applicant. Anyone else goes to the dashboard.
+ */
 export async function requireRoleOrRedirect(role: Role): Promise<CurrentUser> {
   const user = await requireUserOrRedirect();
-  if (role === "admin" && user.role !== "admin") redirect("/dashboard");
+  if (user.role !== role) redirect("/dashboard");
   return user;
 }
 
@@ -41,8 +44,9 @@ export async function requireUser(): Promise<CurrentUser> {
   return user;
 }
 
+/** Exact role. Admin does not inherit underwriter, and underwriter does not inherit applicant. */
 export async function requireRole(role: Role): Promise<CurrentUser> {
   const user = await requireUser();
-  if (role === "admin" && user.role !== "admin") throw new ForbiddenError();
+  if (user.role !== role) throw new ForbiddenError();
   return user;
 }

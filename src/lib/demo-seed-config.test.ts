@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { demoSeedConfig } from "./demo-seed-config";
+import { assertDemoTargetAllowed, demoSeedConfig } from "./demo-seed-config";
 import { isDemoEmail } from "./demo-identity";
 
 const ok = { DEMO_SEED: "yes", APP_URL: "http://localhost:3000", DATABASE_URL: "postgres://app:app@localhost:5432/app", DEMO_PASSWORD: "a-long-demo-password" };
+
+describe("assertDemoTargetAllowed", () => {
+  it("checks the host without requiring DEMO_SEED or a password", () => {
+    expect(assertDemoTargetAllowed({ APP_URL: "http://localhost:3000", DATABASE_URL: ok.DATABASE_URL }).appUrl).toBe(
+      "http://localhost:3000",
+    );
+    expect(() => assertDemoTargetAllowed({ APP_URL: "https://app8.breakthruventures.ai" })).toThrow(/production host/);
+  });
+});
 
 describe("demoSeedConfig", () => {
   it("accepts a local app and database", () => {

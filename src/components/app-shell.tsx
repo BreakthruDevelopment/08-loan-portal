@@ -85,6 +85,9 @@ export async function AppShell({ children, nav }: { children: ReactNode; nav?: R
       </header>
 
       <main id="main" className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6 sm:py-10">
+        <p className="mb-6 rounded-card border border-border bg-accent-soft px-4 py-3 text-sm" role="note">
+          This is a demo. Don&apos;t enter real financial information or upload real documents.
+        </p>
         {children}
       </main>
 

@@ -19,8 +19,12 @@ const PRODUCTION_DB_HOST_SUFFIXES = [
   ".rds.amazonaws.com", // AWS RDS and Aurora
 ];
 
-export function demoSeedConfig(values: Record<string, string | undefined> = process.env) {
-  if (values.DEMO_SEED !== "yes") throw new Error("Demo seed refused: set DEMO_SEED=yes.");
+/**
+ * Host checks only. The admin button calls this so a production origin is refused
+ * even when DEMO_SEED is unset. The CLI also requires DEMO_SEED and DEMO_PASSWORD
+ * via `demoSeedConfig`.
+ */
+export function assertDemoTargetAllowed(values: Record<string, string | undefined> = process.env) {
   const parsedUrl = z.string().url().safeParse(values.APP_URL);
   if (!parsedUrl.success) throw new Error("Demo seed refused: set APP_URL to a valid URL.");
   const appUrl = parsedUrl.data;
@@ -41,6 +45,12 @@ export function demoSeedConfig(values: Record<string, string | undefined> = proc
   if (dbHost === "postgres" || (dbHost && PRODUCTION_DB_HOST_SUFFIXES.some((s) => dbHost.endsWith(s)))) {
     throw new Error("Demo seed refused: DATABASE_URL is a production database host.");
   }
+  return { appUrl };
+}
+
+export function demoSeedConfig(values: Record<string, string | undefined> = process.env) {
+  if (values.DEMO_SEED !== "yes") throw new Error("Demo seed refused: set DEMO_SEED=yes.");
+  const { appUrl } = assertDemoTargetAllowed(values);
   const password = z.string().min(10).max(128).parse(values.DEMO_PASSWORD);
   return { appUrl, password };
 }

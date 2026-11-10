@@ -1,15 +1,16 @@
-# 30 Apps Template
+# Loan Application Portal
 
-The starting point for every app in Breakthru Ventures' **30 apps in 30 days** portfolio. Each app is a
-responsive web app with a Postgres database, sign-in with roles, one AI feature, and a single container
-image that deploys to AWS, Azure, Google Cloud or Oracle Cloud.
+A borrower portal and an underwriting desk for the Breakthru Ventures portfolio. Applicants file a
+personal-loan application, underwriters review submitted files, and admins see counts plus an audit log.
+This is a demo. Don't enter real financial information or upload real documents.
 
 ## What this app does
 
-_Each app replaces this section: the customer problem, who uses it, and what the AI feature does._
-
-The template ships an example "items" feature: users manage their own items, admins see everyone's, and
-an AI summary describes the list.
+Applicants create and edit their own drafts, attach documents, and submit. Underwriters work a queue of
+submitted applications: claim, request information, and approve or decline with reason codes. Admins
+grant the underwriter role, read counts and storage, and verify the audit chain. They never see
+application contents. The risk summary is a later issue. A full write-up of the state machine, the vault,
+and fair-lending rules is too.
 
 ## Architecture
 
@@ -28,13 +29,14 @@ Next.js container ── pages, server actions, route handlers (/api/*)
 | Config, validated at startup | `src/lib/env.ts` |
 | Schema and migrations | `src/lib/db/schema.ts`, `drizzle/` |
 | Sign-in, sessions, roles | `src/lib/auth/` (Better Auth + admin plugin) |
-| Access rules | `src/lib/auth/rbac.ts`, enforced in every data function |
+| Access rules | `src/lib/access.ts` for applications (admin content is a 404). `src/lib/auth/rbac.ts` maps a session to one role |
 | AI gateway | `src/lib/ai/` — input cap, JSON schema validation, demo fallback |
 | Health check | `GET /api/health` (503 if the database is down) |
 
 ## Auth and roles
 
-Two roles, `user` and `admin`, via Better Auth's admin plugin. **Admins manage accounts but never act as users:**
+Three roles, `user` (applicant), `underwriter`, and `admin`, via Better Auth's admin plugin. An underwriter
+has no admin-plugin permissions. Admin is not a superset of underwriter. **Admins manage accounts but never act as users:**
 `src/lib/auth/permissions.ts` gives `admin` create, list, get, update, set-role, ban and delete on users plus
 session revoke/delete. It withholds `impersonate`, `impersonate-admins`, `set-password` and `set-email`
 (Better Auth's default admin role includes them) and session `list`, which would expose other users' raw

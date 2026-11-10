@@ -20,6 +20,10 @@ export const roles = {
     user: ["create", "list", "set-role", "ban", "delete", "get", "update"],
     session: ["revoke", "delete"],
   }),
+  // Underwriters decide applications. They get none of the admin plugin's user or
+  // session powers; those stay with admin so credit decisions and account
+  // administration are not the same job. App checks live in src/lib/access.ts.
+  underwriter: ac.newRole({ user: [], session: [] }),
   user: ac.newRole({ user: [], session: [] }),
 };
 

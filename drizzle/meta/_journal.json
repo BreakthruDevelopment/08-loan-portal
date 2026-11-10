@@ -15,6 +15,13 @@
       "when": 1794291844457,
       "tag": "0001_shared-helpers",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794293929756,
+      "tag": "0002_loan-core",
+      "breakpoints": true
     }
   ]
 }
