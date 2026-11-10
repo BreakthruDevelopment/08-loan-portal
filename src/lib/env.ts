@@ -27,6 +27,8 @@ const schema = z.object({
   // Provider call timeout. 20 s keeps AI calls inside Lambda's 29 s limit (route maxDuration is 25 s).
   AI_TIMEOUT_MS: z.coerce.number().int().positive().max(22000).default(20000),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  // App-wide cap on risk summaries per UTC day (a model call each when a live provider is set).
+  RISK_DAILY_CAP: z.coerce.number().int().min(1).max(10000).default(200),
   // App-wide document bytes cap. The spec's free-tier ceiling is 2,048 MB.
   DOC_STORAGE_CAP_MB: z.coerce.number().int().positive().max(2048).default(2048),
 });

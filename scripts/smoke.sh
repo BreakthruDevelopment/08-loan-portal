@@ -95,4 +95,16 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_U" "$BASE_URL/api/applica
 [ "$code" = "404" ] || fail "underwriter should get 404 on a draft, got $code"
 pass "underwriter cannot see A's draft"
 
+# Risk summary route: underwriters only, submitted files only. Everyone else gets the same 404.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/applications/$id/risk")
+[ "$code" = "401" ] || fail "anonymous risk GET should be 401, got $code"
+for jar in "$JAR_A" "$JAR_B" "$JAR_U"; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/api/applications/$id/risk")
+  [ "$code" = "404" ] || fail "risk GET on a draft should be 404 (applicant or underwriter), got $code"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" -X POST -H 'content-type: application/json' -H "origin: $BASE_URL" \
+    -d '{}' "$BASE_URL/api/applications/$id/risk")
+  [ "$code" = "404" ] || fail "risk POST on a draft should be 404, got $code"
+done
+pass "risk summary refuses anonymous, applicants and underwriters on a draft"
+
 echo "SMOKE PASS"
