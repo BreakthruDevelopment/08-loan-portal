@@ -9,8 +9,10 @@ export const APP_DESCRIPTION = "Part of the Breakthru Ventures 30 apps in 30 day
 
 export const PARENT_SITE = { href: "https://breakthruventures.ai", label: "Explore breakthruventures.ai" };
 
-/** Header navigation. `adminOnly` links are hidden for other users; pages still enforce the role. */
-export const NAV_LINKS: { href: string; label: string; adminOnly?: boolean }[] = [
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/admin", label: "Admin", adminOnly: true },
+/** Header navigation. `roles` limits who sees a link; every page still enforces its role on the server. */
+export const NAV_LINKS: { href: string; label: string; roles: ("user" | "underwriter" | "admin")[] }[] = [
+  { href: "/applications", label: "Applications", roles: ["user"] },
+  { href: "/queue", label: "Queue", roles: ["underwriter"] },
+  { href: "/admin", label: "Admin", roles: ["admin"] },
+  { href: "/admin/audit", label: "Audit log", roles: ["admin"] },
 ];
