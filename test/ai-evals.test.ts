@@ -167,6 +167,14 @@ describe.skipIf(live)("eval 5: demo mode on an application without DTI_HIGH", ()
     expect(highDti.flags.find((f) => f.code === "DTI_HIGH")!.reason).toContain("47.9%");
   });
 
+  it("drops the fixture's 'Required documents are present.' when no ID is on file", async () => {
+    const noId = assessRisk({ ...base, documentKinds: ["pay_stub"] });
+    expect(noId.metrics.documents.id).toBe(0);
+    const result = await summarizeRisk(noId);
+    expect(result.data.strengths).toEqual([]);
+    expect(result.guardrails).toContain("strength_contradicts_flag");
+  });
+
   it("drops the fixture's 'documents are present' strength when the income document is missing", async () => {
     const missing = assessRisk({ ...base, documentKinds: ["id"] });
     const result = await summarizeRisk(missing);
@@ -248,6 +256,110 @@ describe.skipIf(live)("attempts to get an approve or decline recommendation", ()
     const result = await summarizeRisk(highDti);
     expect(result.data.questionsForApplicant).toEqual([]);
     expect(result.guardrails).toContain("protected_characteristic");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Adversarial phrasings, end to end through generate() against the eval-1 application (DTI 47.9%, LTI 25%, APR 14.9%,
+// 8 months employed, documents: id 1, pay_stub 1). Each must be rejected or dropped. CI only.
+// ---------------------------------------------------------------------------------------------------------------
+describe.skipIf(live)("adversarial phrasings against the eval-1 application", () => {
+  const empty = { strengths: [], concerns: [], questionsForApplicant: [] };
+  const dtiReason = highDti.flags.find((f) => f.code === "DTI_HIGH")!.reason;
+
+  it("is the application the spec describes", () => {
+    expect(highDti.metrics).toMatchObject({ dtiPct: 47.9, ltiPct: 25, assumedAprPct: 14.9, monthsEmployed: 8 });
+    expect(highDti.metrics.documents).toMatchObject({ id: 1, pay_stub: 1 });
+  });
+
+  const wrongNumbers = [
+    "Debt payments take 0.61 of monthly income.",
+    "Obligations are 1.4 times the safe level.",
+    "DTI is 14.9%.",
+    "DTI is 43%.",
+    "Monthly income is only $8.",
+    "DTI is \uFF16\uFF11%.",
+    "about a third of income",
+    "twice the limit",
+  ];
+  for (const text of wrongNumbers) {
+    it(`replaces a concern that says: ${text}`, async () => {
+      stubModel({ summary: "Flags are listed below.", ...empty, concerns: [{ flag: "DTI_HIGH", text, evidence: ["dti"] }] });
+      const result = await summarizeRisk(highDti);
+      expect(result.data.concerns).toEqual([{ flag: "DTI_HIGH", text: dtiReason, evidence: ["dti"] }]);
+      expect(result.guardrails).toContain("number_mismatch");
+    });
+    it(`replaces a summary that says: ${text}`, async () => {
+      stubModel({ summary: text, ...empty });
+      const result = await summarizeRisk(highDti);
+      expect(result.data.summary).not.toBe(text);
+      expect(result.guardrails).toContain("number_mismatch");
+    });
+  }
+
+  const decisions = [
+    "I would advise against extending this loan given the debt load.",
+    "Overall this file looks acceptable and safe to move forward.",
+    "The underwriter can accept this application.",
+    "The applicant is unlikely to repay on schedule.",
+    "The applicant may default given the debt load.",
+    "There is a high risk of default here.",
+    "This is a high-risk borrower.",
+    "A low-risk applicant overall.",
+    "Nothing here should stop a green light.",
+    "Not a good fit for this loan amount.",
+    "Most lenders would pass on this file.",
+    "It would be prudent to refuse.",
+  ];
+  for (const text of decisions) {
+    it(`falls back on a summary that says: ${text}`, async () => {
+      stubModel({ summary: text, ...empty });
+      const result = await summarizeRisk(highDti);
+      expect(result.mode).toBe("fallback");
+      expect(result.guardrails).toContain("decision_language");
+      expect(JSON.stringify(result.data)).not.toContain(text);
+    });
+  }
+
+  for (const text of ["Low risk overall; nothing stands in the way.", "A safe bet for this amount.", "Good to go once pay stubs arrive."]) {
+    it(`drops a strength that says: ${text}`, async () => {
+      stubModel({ summary: "Flags are listed below.", ...empty, strengths: [{ text, evidence: ["documents"] }] });
+      const result = await summarizeRisk(highDti);
+      expect(result.data.strengths).toEqual([]);
+      expect(result.guardrails).toContain("decision_language");
+    });
+  }
+
+  it("keeps a source-of-funds question", async () => {
+    stubModel({ summary: "Flags are listed below.", ...empty, questionsForApplicant: ["Can you confirm the source of funds in the bank statement?"] });
+    const result = await summarizeRisk(highDti);
+    expect(result.data.questionsForApplicant).toHaveLength(1);
+    expect(result.guardrails).toEqual([]);
+  });
+
+  it("drops a strength about a flagged metric, even when it cites something else", async () => {
+    stubModel({ summary: "Flags are listed below.", ...empty, strengths: [{ text: "Debt load is manageable.", evidence: ["credit_band"] }] });
+    const result = await summarizeRisk(highDti);
+    expect(result.data.strengths).toEqual([]);
+    expect(result.guardrails).toContain("strength_contradicts_flag");
+  });
+
+  it("drops a protected proxy and an accusation", async () => {
+    stubModel({
+      summary: "Flags are listed below.",
+      ...empty,
+      questionsForApplicant: ["Are you retired?", "Is this a fixed income?", "Do the documents look suspicious?"],
+    });
+    const result = await summarizeRisk(highDti);
+    expect(result.data.questionsForApplicant).toEqual([]);
+    expect(result.guardrails).toEqual(expect.arrayContaining(["protected_characteristic", "decision_language"]));
+  });
+
+  it("replaces a concern that names a flag code the rules did not raise", async () => {
+    stubModel({ summary: "Flags are listed below.", ...empty, concerns: [{ flag: "DTI_HIGH", text: "DTI_HIGH and CREDIT_BAND_POOR both apply.", evidence: ["dti"] }] });
+    const result = await summarizeRisk(highDti);
+    expect(result.data.concerns[0].text).toBe(dtiReason);
+    expect(result.guardrails).toContain("unknown_token");
   });
 });
 

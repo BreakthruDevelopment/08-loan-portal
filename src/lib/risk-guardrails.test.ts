@@ -52,6 +52,8 @@ describe("decision-language filter", () => {
     "Debt-to-income is 47.9% with the new payment.",
     "Stated income hasn't been checked against the documents.",
     "Ask for the two most recent pay stubs.",
+    "Confirm the source of funds in the bank statement.",
+    "Ask how the applicant plans to address the missing pay stub.",
   ])("lets %s through", (text) => expect(hits(DECISION_PATTERNS, text)).toBe(false));
 });
 
@@ -70,15 +72,33 @@ describe("protected-characteristics filter", () => {
     "bad neighborhood",
     "receives public assistance",
     "has three children",
+    "Employment status is retired but income is stated",
+    "lives on a pension",
+    "relies on Social Security",
+    "receives SSI",
+    "a fixed income",
+    "a full-time student",
+    "a veteran",
+    "military service",
+    "the home address is out of state",
   ])("catches %s", (text) => expect(hits(PROTECTED_PATTERNS, text)).toBe(true));
 
   it.each([
     "The percentage of income is above the threshold",
     "average payment relative to income",
     "managed expenses",
-    "Employment status is retired but income is stated",
     "months employed is under the limit",
+    "Please address the missing document.",
+    "The underwriter should be familiar with the pay stub format.",
   ])("lets %s through", (text) => expect(hits(PROTECTED_PATTERNS, text)).toBe(false));
+});
+
+describe("eval-1 application", () => {
+  it("is the one the adversarial cases below run against", () => {
+    expect(assessment.metrics).toMatchObject({ dtiPct: 47.9, ltiPct: 25, assumedAprPct: 14.9, monthsEmployed: 8 });
+    expect(assessment.metrics.documents).toMatchObject({ id: 1, pay_stub: 1 });
+    expect(assessment.flags.map((f) => f.code)).toEqual(["DTI_HIGH", "SHORT_EMPLOYMENT", "INCOME_UNVERIFIED"]);
+  });
 });
 
 describe("number guardrail", () => {
@@ -99,6 +119,96 @@ describe("number guardrail", () => {
   it("rejects spelled-out numbers in claims, but not in questions", () => {
     expect(hasUnverifiedNumber("Forty-eight percent of income", allowed)).toBe(true);
     expect(textViolations("Can you provide your two latest pay stubs?", allowed, { words: false })).toEqual([]);
+  });
+});
+
+describe("numbers are matched by unit, not as a bag of numbers", () => {
+  it.each([
+    "Debt payments take 0.61 of monthly income.",
+    "Obligations are 1.4 times the safe level.",
+    "DTI is 14.9%.",
+    "DTI is 43%.",
+    "Monthly income is only $8.",
+    "DTI is \uFF16\uFF11%.",
+    "about a third of income",
+    "twice the limit",
+    "a quarter of income",
+    "half of income",
+    "APR is 47.9%.",
+    "The loan is 47.9% of annual income.",
+    "Income is 4000 a month.",
+    "The new payment is $415.99.",
+    "That is 20 months.",
+    "Debt-to-income is 36%.",
+  ])("rejects %s", (text) => expect(textViolations(text, allowed)).toContain("number_mismatch"));
+
+  it.each([
+    "DTI is 47.9%.",
+    "DTI is 48%.",
+    "Debt-to-income is 47.9% with the estimated new payment of $415.40, above the 43% limit.",
+    "DTI is 48% with the new payment, above the 43% limit.",
+    "The loan is 25% of annual income.",
+    "Loan-to-income is 25.0% and the APR is 14.9%.",
+    "DTI is 0.479 of income.",
+    "Income is $4,000 a month and the payment is about $415.",
+    "8 months in the current job, under 12 months.",
+    "Stated income is $4,000.00 a month.",
+    "Debt-to-income would be between 36% and 43%.",
+  ])("accepts %s", (text) => expect(textViolations(text, allowed)).not.toContain("number_mismatch"));
+
+  it("accepts the numbers in the rules' own reasons", () => {
+    for (const flag of assessment.flags) expect(hasUnverifiedNumber(flag.reason, allowed), flag.reason).toBe(false);
+    const elevated = assessRisk({ ...input, annualIncomeCents: 5_900_000, monthsEmployed: 36 });
+    for (const flag of elevated.flags) expect(hasUnverifiedNumber(flag.reason, allowedNumbers(elevated)), flag.reason).toBe(false);
+  });
+});
+
+describe("decision and prediction language", () => {
+  it.each([
+    "I would advise against extending this loan given the debt load.",
+    "Overall this file looks acceptable and safe to move forward.",
+    "The underwriter can accept this application.",
+    "The applicant is unlikely to repay on schedule.",
+    "The applicant may default given the debt load.",
+    "There is a high risk of default here.",
+    "This is a high-risk borrower.",
+    "A low-risk applicant overall.",
+    "Nothing here should stop a green light.",
+    "Not a good fit for this loan amount.",
+    "Most lenders would pass on this file.",
+    "It would be prudent to refuse.",
+    "Low risk overall; nothing stands in the way.",
+    "A safe bet for this amount.",
+    "Good to go once pay stubs arrive.",
+    "I suggest a closer look.",
+    "Time to go ahead and sign off.",
+    "This could be a case of fraud.",
+    "Some documents look suspicious.",
+    "The stated income seems dishonest.",
+    "This file should be funded.",
+    "The bank would fund the loan.",
+  ])("rejects %s", (text) => expect(textViolations(text, allowed)).toContain("decision_language"));
+
+  it("normalises look-alike characters before matching", () => {
+    expect(textViolations("I recommend app\u200Brov\uFF41l.", allowed)).toContain("decision_language");
+    expect(textViolations("\uFF21\uFF50\uFF50\uFF52\uFF4F\uFF56\uFF45 it", allowed)).toContain("decision_language");
+  });
+
+  it("drops such strengths, and replaces the summary", () => {
+    const strengths = ["Low risk overall; nothing stands in the way.", "A safe bet for this amount.", "Good to go once pay stubs arrive."];
+    const result = applyGuardrails(output({ strengths: strengths.map((text) => ({ text, evidence: ["documents"] as ["documents"] })) }), assessment);
+    expect(result.data.strengths).toEqual([]);
+    expect(result.codes).toContain("decision_language");
+    expect(applyGuardrails(output({ summary: "The applicant may default given the debt load." }), assessment).fallback).toBe(true);
+  });
+});
+
+describe("unrecognised ALL-CAPS tokens", () => {
+  it("rejects a code the rules did not raise, accepts raised codes and DTI, LTI, APR", () => {
+    expect(textViolations("Flagged as CREDIT_BAND_POOR.", allowed)).toContain("unknown_token");
+    expect(textViolations("See FRAUD_SUSPECTED.", allowed)).toContain("unknown_token");
+    expect(textViolations("This is VERY HIGH.", allowed)).toContain("unknown_token");
+    expect(textViolations("DTI_HIGH applies; DTI and LTI use the APR.", allowed)).not.toContain("unknown_token");
   });
 });
 
@@ -179,6 +289,41 @@ describe("applyGuardrails", () => {
     expect(result.data.strengths).toEqual([{ text: "Documents are on file.", evidence: ["documents"] }]);
     expect(result.data.questionsForApplicant).toEqual(["Can you share a recent bank statement?"]);
     expect(result.codes).toEqual(expect.arrayContaining(["strength_contradicts_flag", "decision_language", "protected_characteristic"]));
+  });
+
+  it("drops a strength about a flagged metric even when its evidence is something else", () => {
+    const result = applyGuardrails(output({ strengths: [{ text: "Debt load is manageable.", evidence: ["credit_band"] }] }), assessment);
+    expect(result.data.strengths).toEqual([]);
+    expect(result.codes).toContain("strength_contradicts_flag");
+  });
+
+  it.each([
+    ["Debt payments are comfortable.", ["credit_band"]],
+    ["The new payment is small.", ["lti"]],
+    ["Obligations look light.", ["documents"]],
+    ["Time in the current job is solid.", ["months_employed"]],
+  ] as const)("drops the strength %s (DTI_HIGH and SHORT_EMPLOYMENT raised)", (text, evidence) => {
+    const result = applyGuardrails(output({ strengths: [{ text, evidence: [...evidence] }] }), assessment);
+    expect(result.data.strengths).toEqual([]);
+  });
+
+  it("drops a strength that names a metric outside its evidence", () => {
+    const calm = assessRisk({ ...input, amountCents: 800_000, creditBand: "excellent", annualIncomeCents: 10_800_000, monthlyHousingCents: 150_000, monthlyDebtCents: 20_000, monthsEmployed: 72 });
+    const ok = applyGuardrails(output({ strengths: [{ text: "Debt-to-income is 22%.", evidence: ["dti"] }] }), calm);
+    expect(ok.data.strengths).toHaveLength(1);
+    const off = applyGuardrails(output({ strengths: [{ text: "Income is steady.", evidence: ["dti"] }] }), calm);
+    expect(off.data.strengths).toEqual([]);
+    expect(off.codes).toContain("strength_unsupported");
+    const loan = applyGuardrails(output({ strengths: [{ text: "Loan-to-income is low.", evidence: ["dti"] }] }), calm);
+    expect(loan.data.strengths).toEqual([]);
+  });
+
+  it("drops 'required documents are present' when no ID is on file", () => {
+    const noId = assessRisk({ ...input, documentKinds: ["pay_stub"] });
+    const result = applyGuardrails(output({ strengths: [{ text: "Required documents are present.", evidence: ["documents"] }] }), noId);
+    expect(result.data.strengths).toEqual([]);
+    const withId = applyGuardrails(output({ strengths: [{ text: "Required documents are present.", evidence: ["documents"] }] }), assessment);
+    expect(withId.data.strengths).toHaveLength(1);
   });
 
   it("replaces only the summary text when it has a wrong number", () => {

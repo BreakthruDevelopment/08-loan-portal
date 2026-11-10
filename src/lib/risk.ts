@@ -41,7 +41,7 @@ export type RiskView = {
   summary: RiskSummaryView | null;
   /** A summary exists for an older version of the application; generate a new one. */
   outdated: boolean;
-  /** True when the model was unavailable and this summary is the rule reasons only. Not stored. */
+  /** True when the model was unavailable. `summary` is then the cached one (a failed regeneration) or the rule reasons only (never stored). */
   unavailable?: boolean;
   disclaimer: string;
 };
@@ -162,6 +162,9 @@ export async function generateRiskView(actor: Actor, applicationId: string, inpu
       await releaseDaily(tx, "risk");
     });
     const loaded = await loadAssessment(db(), actor, applicationId);
+    // A failed regeneration keeps what is stored (and its real allowance), and says the model was unavailable.
+    const { current } = await storedFor(db(), loaded.id, loaded.hash);
+    if (current) return { ...viewOf(loaded.id, loaded.row.version, loaded.assessment, current, false), unavailable: true };
     return {
       ...viewOf(loaded.id, loaded.row.version, plan.assessment, null, false),
       summary: {

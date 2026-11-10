@@ -158,14 +158,14 @@ export function computeFlags(input: RiskInput, metrics: RiskMetrics): RuleFlag[]
     );
   }
 
-  if (ltiPct === null) {
+  if (input.annualIncomeCents === 0) {
     add(
       "LTI_HIGH",
       "medium",
       "stated annual income is zero, so loan-to-income can't be measured",
       "Stated income is zero, so loan-to-income can't be measured and is treated as too high.",
     );
-  } else if (ltiPct > THRESHOLDS.ltiHighAbove) {
+  } else if (ltiPct !== null && ltiPct > THRESHOLDS.ltiHighAbove) {
     add("LTI_HIGH", "medium", `lti > ${THRESHOLDS.ltiHighAbove}`, `The loan is ${formatPct(ltiPct)} of annual income, above the ${THRESHOLDS.ltiHighAbove}% limit.`);
   }
 
