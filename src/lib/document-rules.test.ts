@@ -14,7 +14,9 @@ describe("document rules", () => {
   it("requires the extension to agree when one is present", () => {
     expect(extensionAgrees("id.pdf", "application/pdf")).toBe(true);
     expect(extensionAgrees("id.png", "application/pdf")).toBe(false);
-    expect(extensionAgrees("statement", "application/pdf")).toBe(true);
+    expect(extensionAgrees("statement", "application/pdf")).toBe(false);
+    expect(extensionAgrees("statement.", "application/pdf")).toBe(false);
+    expect(extensionAgrees(".pdf", "application/pdf")).toBe(false);
   });
 
   it("strips path characters from a display name", () => {

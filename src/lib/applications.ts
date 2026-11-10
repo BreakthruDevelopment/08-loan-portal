@@ -55,6 +55,21 @@ function asFields(row: typeof app.$inferSelect): ApplicationFieldValues {
   };
 }
 
+type ApplicationRow = typeof app.$inferSelect;
+/** What an applicant sees of their own file: no reviewer identity and no underwriter's free-text decision note. */
+export type ApplicantApplication = Omit<ApplicationRow, "assignedUnderwriterId" | "decisionNote"> & {
+  assignedUnderwriterId?: undefined;
+  decisionNote?: undefined;
+};
+
+function present(actor: Actor, row: ApplicationRow): ApplicationRow | ApplicantApplication {
+  if (actor.role !== "user") return row;
+  const { assignedUnderwriterId: _reviewer, decisionNote: _note, ...applicant } = row;
+  void _reviewer;
+  void _note;
+  return applicant;
+}
+
 async function lockVisible(tx: Tx, actor: Actor, id: string, version?: number) {
   await advisoryLock(tx, `application:${id}`);
   const [row] = await tx.select().from(app).where(and(eq(app.id, id), contentWhere(actor)));
@@ -69,7 +84,7 @@ export async function listApplications(actor: Actor) {
   if (actor.role === "admin") throw new NotFoundError();
   if (actor.role !== "user") throw new ForbiddenError();
   const rows = await db().select().from(app).where(eq(app.applicantId, actor.id)).orderBy(desc(app.updatedAt)).limit(50);
-  return rows.filter((row) => canReadApplication(actor, row));
+  return rows.filter((row) => canReadApplication(actor, row)).map((row) => present(actor, row));
 }
 
 export async function listQueue(actor: Actor, tab: QueueTab) {
@@ -77,7 +92,7 @@ export async function listQueue(actor: Actor, tab: QueueTab) {
   if (actor.role !== "underwriter") throw new ForbiddenError();
   const where =
     tab === "new"
-      ? and(eq(app.status, "submitted"), isNull(app.assignedUnderwriterId))
+      ? and(inArray(app.status, ["submitted", "in_review"]), isNull(app.assignedUnderwriterId))
       : tab === "mine"
         ? and(eq(app.assignedUnderwriterId, actor.id), inArray(app.status, ["in_review", "info_requested"]))
         : inArray(app.status, ["approved", "declined"]);
@@ -98,7 +113,7 @@ export async function getApplication(actor: Actor, id: string) {
         detail: { status: row.status },
       });
     }
-    return row;
+    return present(actor, row);
   });
 }
 
@@ -132,7 +147,7 @@ export async function createApplication(actor: Actor, input: unknown = {}) {
       });
     }
     log.info("application.created", { applicationId: row.id });
-    return row;
+    return present(actor, row);
   });
 }
 
@@ -145,7 +160,7 @@ export async function updateApplication(actor: Actor, id: string, input: unknown
     if (actor.role !== "user" || row.applicantId !== actor.id) throw new ForbiddenError();
     if (!isEditableStatus(row.status)) throw new ConflictError("This application can't be edited now.");
     const names = changedFieldNames(asFields(row), fields);
-    if (names.length === 0) return row;
+    if (names.length === 0) return present(actor, row);
     const [next] = await tx
       .update(app)
       .set({ ...fields, version: row.version + 1, updatedAt: new Date() })
@@ -159,7 +174,7 @@ export async function updateApplication(actor: Actor, id: string, input: unknown
       applicationId: row.id,
       detail: { fields: names },
     });
-    return next;
+    return present(actor, next);
   });
 }
 
@@ -205,6 +220,7 @@ export async function transitionApplication(actor: Actor, id: string, input: unk
       role: actor.role,
       isOwner: row.applicantId === actor.id,
       isAssigned: row.assignedUnderwriterId === actor.id,
+      isUnassigned: row.assignedUnderwriterId === null,
       fieldsComplete: fieldsComplete(asFields(row)),
       hasIdDocument: docs.some((doc) => doc.kind === "id"),
       hasIncomeDocument: docs.some((doc) => (INCOME_DOCUMENT_KINDS as readonly string[]).includes(doc.kind)),
@@ -270,7 +286,7 @@ export async function transitionApplication(actor: Actor, id: string, input: unk
       detail,
     });
     log.info("application.transition", { action, from: row.status, to: next.status, applicationId: row.id });
-    return next;
+    return present(actor, next);
   });
 }
 

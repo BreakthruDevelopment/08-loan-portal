@@ -54,9 +54,11 @@ export type QueueTab = (typeof QUEUE_TABS)[number];
 export const AMOUNT_MIN_CENTS = 100_000;
 export const AMOUNT_MAX_CENTS = 5_000_000;
 /** Sanity ceilings so a draft can't store an unbounded number. */
-export const INCOME_MAX_CENTS = 100_000_000_00;
+/** Stored in a 32-bit integer column (max 2,147,483,647), so the cap stays below that. */
+export const INCOME_MAX_CENTS = 2_000_000_000;
 export const MONTHLY_MAX_CENTS = 10_000_000_00;
 export const OPEN_APPLICATION_CAP = 3;
+export const NOTES_PER_APPLICATION_CAP = 50;
 export const MAX_FILE_BYTES = 5 * 1024 * 1024;
 export const MAX_FILES_PER_APPLICATION = 8;
 export const MAX_BYTES_PER_APPLICATION = 20 * 1024 * 1024;
@@ -176,6 +178,8 @@ export type TransitionPlanInput = {
   role: Role;
   isOwner: boolean;
   isAssigned: boolean;
+  /** No underwriter holds the file (the assignee was deleted or demoted). Any underwriter may release it. */
+  isUnassigned?: boolean;
   fieldsComplete: boolean;
   hasIdDocument: boolean;
   hasIncomeDocument: boolean;
@@ -224,7 +228,8 @@ export function planTransition(input: TransitionPlanInput): TransitionEffect {
   }
 
   if (from === "in_review" && to === "submitted") {
-    if (role !== "underwriter" || !isAssigned) throw new ForbiddenError();
+    // An in_review file with no assignee (the underwriter's account was deleted) would be stuck, so any underwriter may release it.
+    if (role !== "underwriter" || !(isAssigned || input.isUnassigned)) throw new ForbiddenError();
     return { kind: "release" };
   }
 
@@ -236,6 +241,11 @@ export function planTransition(input: TransitionPlanInput): TransitionEffect {
 
   if (from === "info_requested" && to === "submitted") {
     if (role !== "user" || !isOwner) throw new ForbiddenError();
+    // The applicant can edit fields and delete documents while information is requested, so re-check what submit checks.
+    if (!input.fieldsComplete) throw new ConflictError("Fill in every required field before submitting.");
+    if (!input.hasIdDocument || !input.hasIncomeDocument) {
+      throw new ConflictError("Submit needs an identification document and an income document.");
+    }
     if (!input.hasReplyOrDocument && input.message.trim().length < 1) {
       throw new ConflictError("Reply to the request or add a document before sending the application back.");
     }

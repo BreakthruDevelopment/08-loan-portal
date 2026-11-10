@@ -31,6 +31,21 @@ describe("planTransition", () => {
     expect(() => plan({ hasIncomeDocument: false })).toThrow(ConflictError);
   });
 
+  it("re-checks fields and documents when the applicant resubmits from info_requested", () => {
+    const resubmit = { from: "info_requested" as const, hasReplyOrDocument: true };
+    expect(plan(resubmit).kind).toBe("resubmit");
+    expect(() => plan({ ...resubmit, fieldsComplete: false })).toThrow(ConflictError);
+    expect(() => plan({ ...resubmit, hasIdDocument: false })).toThrow(ConflictError);
+    expect(() => plan({ ...resubmit, hasIncomeDocument: false })).toThrow(ConflictError);
+  });
+
+  it("lets any underwriter release an in_review file that has no assignee, and only then", () => {
+    const stuck = { from: "in_review" as const, to: "submitted" as const, role: "underwriter" as const, isOwner: false };
+    expect(plan({ ...stuck, isUnassigned: true }).kind).toBe("release");
+    expect(() => plan({ ...stuck, isUnassigned: false })).toThrow(ForbiddenError);
+    expect(() => plan({ ...stuck, isUnassigned: true, role: "user" })).toThrow(ForbiddenError);
+  });
+
   it("lets any underwriter claim a submitted file", () => {
     expect(plan({ from: "submitted", to: "in_review", role: "underwriter", isOwner: false }).kind).toBe("claim");
     expect(() => plan({ from: "submitted", to: "in_review" })).toThrow(ForbiddenError);

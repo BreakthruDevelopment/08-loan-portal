@@ -1,0 +1,2 @@
+ALTER TABLE "application" DROP CONSTRAINT "application_income_chk";--> statement-breakpoint
+ALTER TABLE "application" ADD CONSTRAINT "application_income_chk" CHECK ("application"."annual_income_cents" is null or ("application"."annual_income_cents" between 0 and 2000000000));

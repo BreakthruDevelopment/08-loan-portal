@@ -195,7 +195,7 @@ export const application = pgTable(
     nullableInList(t.employmentStatus, "application_employment_chk", EMPLOYMENT_STATUSES),
     check("application_employer_chk", sql`${t.employerName} is null or char_length(${t.employerName}) <= 120`),
     check("application_months_chk", sql`${t.monthsEmployed} is null or (${t.monthsEmployed} between 0 and 600)`),
-    check("application_income_chk", sql`${t.annualIncomeCents} is null or (${t.annualIncomeCents} between 0 and 10000000000)`),
+    check("application_income_chk", sql`${t.annualIncomeCents} is null or (${t.annualIncomeCents} between 0 and 2000000000)`),
     check("application_housing_chk", sql`${t.monthlyHousingCents} is null or (${t.monthlyHousingCents} between 0 and 1000000000)`),
     check("application_debt_chk", sql`${t.monthlyDebtCents} is null or (${t.monthlyDebtCents} between 0 and 1000000000)`),
     nullableInList(t.creditBand, "application_credit_chk", CREDIT_BANDS),

@@ -28,10 +28,10 @@ export function sanitizeDisplayName(name: string): string {
   return cleaned;
 }
 
-/** When the display name has an extension, it has to agree with the sniffed type. */
+/** The display name needs an extension and it has to agree with the sniffed type. */
 export function extensionAgrees(displayName: string, type: StoredContentType): boolean {
   const dot = displayName.lastIndexOf(".");
-  if (dot <= 0 || dot === displayName.length - 1) return true;
+  if (dot <= 0 || dot === displayName.length - 1) return false;
   const ext = displayName.slice(dot + 1).toLowerCase();
   return EXTENSIONS[type].includes(ext);
 }

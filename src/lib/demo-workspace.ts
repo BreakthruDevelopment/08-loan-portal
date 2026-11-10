@@ -1,5 +1,6 @@
 import "server-only";
 import { inArray } from "drizzle-orm";
+import { appendAudit } from "@/lib/audit";
 import postgres from "postgres";
 import { addDocument } from "@/lib/documents";
 import { auth } from "@/lib/auth";
@@ -76,7 +77,7 @@ export async function loadDemoWorkspace(input: {
       if (!reserved) throw new ConflictError("The demo workspace can only be loaded a few times today.");
     });
 
-    const ids = await createDemoUsers(input.password);
+    const ids = await createDemoUsers(input.password, input.actor);
     await seedApplications(ids);
     log.info("demo.loaded", { applications: 3 });
     return { loaded: true, applications: 3 };
@@ -101,7 +102,7 @@ async function clearDemoUsers(tx: Tx, emails: string[]) {
   await tx.delete(schema.user).where(inArray(schema.user.id, ids));
 }
 
-async function createDemoUsers(password: string): Promise<Record<(typeof DEMO_ACCOUNTS)[number]["key"], string>> {
+async function createDemoUsers(password: string, actor: Actor): Promise<Record<(typeof DEMO_ACCOUNTS)[number]["key"], string>> {
   const ids = {} as Record<(typeof DEMO_ACCOUNTS)[number]["key"], string>;
   for (const account of DEMO_ACCOUNTS) {
     const created = await auth().api.createUser({
@@ -109,11 +110,21 @@ async function createDemoUsers(password: string): Promise<Record<(typeof DEMO_AC
         email: account.email,
         password,
         name: account.name,
-        role: account.role,
-        data: { image: MARKER },
       },
     });
-    await db().update(schema.user).set({ image: MARKER, role: account.role }).where(inArray(schema.user.id, [created.user.id]));
+    // The auth hooks refuse a role or the demo marker on create-user, so both are written directly,
+    // and the role grant gets the same `role.changed` audit row that set-role would write.
+    await db().transaction(async (tx) => {
+      await tx.update(schema.user).set({ image: MARKER, role: account.role }).where(inArray(schema.user.id, [created.user.id]));
+      if (account.role !== "user") {
+        await appendAudit(tx, {
+          actorId: actor.id,
+          actorRole: actor.role,
+          action: "role.changed",
+          detail: { userId: created.user.id, from: "user", to: account.role },
+        });
+      }
+    });
     ids[account.key] = created.user.id;
   }
   return ids;
