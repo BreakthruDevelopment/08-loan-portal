@@ -28,7 +28,7 @@ export async function AppShell({ children, nav }: { children: ReactNode; nav?: R
   // Opt into per-request rendering before the try/catch below, so the catch never swallows the framework's dynamic signal.
   await connection();
   const user = await currentUserOrNull();
-  const links = NAV_LINKS.filter((l) => !l.adminOnly || user?.role === "admin");
+  const links = NAV_LINKS.filter((l) => user !== null && l.roles.includes(user.role));
 
   return (
     <>

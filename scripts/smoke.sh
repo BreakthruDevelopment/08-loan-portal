@@ -222,4 +222,83 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -X DELETE -H "origin: 
 [ "$code" = "409" ] || fail "deleting after submit should be 409, got $code"
 pass "underwriter downloads after submit; B and admin stay 404; uploads and deletes are locked"
 
+# ---- Pages (8.4): data-* assertions on the server-rendered HTML --------------------------------------------------
+html() { curl -fsS -b "$1" "$BASE_URL$2"; }
+status_of() { curl -s -o /dev/null -w '%{http_code}' -b "$1" "$BASE_URL$2"; }
+version_of() { curl -fsS -b "$1" "$BASE_URL/api/applications/$id" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).application.version)))'; }
+
+page=$(html "$JAR_A" /applications) || fail "applicant /applications failed"
+echo "$page" | grep -q 'data-page="applications"' || fail "applications page marker missing"
+echo "$page" | grep -q "data-application-link=\"$id\"" || fail "applications page doesn't list the application"
+echo "$page" | grep -q 'data-application-status="submitted"' || fail "applications page is missing the submitted status"
+page=$(html "$JAR_A" "/applications/$id") || fail "applicant application page failed"
+echo "$page" | grep -q 'data-page="application"' || fail "application page marker missing"
+echo "$page" | grep -q 'data-application-status="submitted"' || fail "application page status wrong"
+echo "$page" | grep -q "data-document-id=\"$doc_pdf\"" || fail "application page doesn't list the PDF"
+echo "$page" | grep -q 'data-deletable="true"' && fail "no document may be deletable after submit"
+echo "$page" | grep -qi 'AI summary' && fail "applicant page mentions the AI summary"
+[ "$(status_of "$JAR_B" "/applications/$id")" = "404" ] || fail "applicant B's page for A's application should be 404"
+for path in /queue "/review/$id" /admin /admin/audit; do
+  [ "$(status_of "$JAR_A" "$path")" = "307" ] || fail "applicant on $path should be redirected"
+done
+for path in /applications /queue "/review/$id"; do
+  [ "$(status_of "$JAR_ADMIN" "$path")" = "307" ] || fail "admin on $path should be redirected"
+done
+[ "$(status_of "$JAR_U" /applications)" = "307" ] || fail "underwriter on /applications should be redirected"
+pass "applicant pages: list, detail with locked documents, no AI summary; other roles redirected"
+
+page=$(html "$JAR_U" "/queue?tab=new") || fail "queue failed"
+echo "$page" | grep -q 'data-page="queue"' || fail "queue marker missing"
+echo "$page" | grep -q 'data-queue-tab="new"' || fail "queue tab marker missing"
+echo "$page" | grep -q "data-application-id=\"$id\"" || fail "the submitted application is not in the New queue"
+page=$(html "$JAR_U" "/review/$id") || fail "review page failed"
+echo "$page" | grep -q 'data-page="review"' || fail "review marker missing"
+echo "$page" | grep -q "data-document-id=\"$doc_pdf\"" || fail "review page doesn't list the PDF"
+echo "$page" | grep -q "href=\"/api/documents/$doc_pdf\"" || fail "review page doesn't link the download route"
+echo "$page" | grep -q 'data-malware-note' || fail "review page is missing the malware note"
+echo "$page" | grep -q 'data-can-claim="true"' || fail "review page should offer a claim"
+pass "underwriter queue and review pages render with downloads and the claim action"
+
+# Claim, then an internal note and an applicant-visible note.
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_U" -X POST -H 'content-type: application/json' -H "origin: $BASE_URL" \
+  -d "{\"to\":\"in_review\",\"version\":$(version_of "$JAR_U")}" "$BASE_URL/api/applications/$id/transition")
+[ "$code" = "200" ] || fail "claim should be 200, got $code"
+for body in '{"body":"INTERNAL-SMOKE-MARKER","visibility":"internal"}' '{"body":"VISIBLE-SMOKE-MARKER","visibility":"applicant"}'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_U" -X POST -H 'content-type: application/json' -H "origin: $BASE_URL" -d "$body" "$BASE_URL/api/applications/$id/notes")
+  [ "$code" = "201" ] || [ "$code" = "200" ] || fail "adding a note should succeed, got $code"
+done
+page=$(html "$JAR_U" "/review/$id")
+echo "$page" | grep -q 'data-application-status="in_review"' || fail "review page should show in_review"
+echo "$page" | grep -q 'data-can-decide="true"' || fail "assigned underwriter should be able to decide"
+echo "$page" | grep -q 'INTERNAL-SMOKE-MARKER' || fail "underwriter should see the internal note"
+page=$(html "$JAR_A" "/applications/$id")
+echo "$page" | grep -q 'VISIBLE-SMOKE-MARKER' || fail "applicant should see the visible note"
+echo "$page" | grep -q 'INTERNAL-SMOKE-MARKER' && fail "applicant must never see the internal note"
+pass "internal notes stay internal; applicant-visible notes reach the applicant"
+
+# Decline with codes; the applicant sees the codes but not the decision note.
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_U" -X POST -H 'content-type: application/json' -H "origin: $BASE_URL" \
+  -d "{\"to\":\"declined\",\"version\":$(version_of "$JAR_U"),\"codes\":[\"DTI_TOO_HIGH\"],\"note\":\"DECISION-SMOKE-MARKER\"}" "$BASE_URL/api/applications/$id/transition")
+[ "$code" = "200" ] || fail "decline should be 200, got $code"
+page=$(html "$JAR_A" "/applications/$id")
+echo "$page" | grep -q 'data-decision="declined"' || fail "applicant should see the declined decision"
+echo "$page" | grep -q 'data-decision-code="DTI_TOO_HIGH"' || fail "applicant should see the reason code"
+echo "$page" | grep -q 'DECISION-SMOKE-MARKER' && fail "applicant must never see the decision note"
+page=$(html "$JAR_U" "/review/$id")
+echo "$page" | grep -q 'DECISION-SMOKE-MARKER' || fail "underwriter should see the decision note"
+pass "decision shows reason codes to the applicant and the note only to the underwriter"
+
+page=$(html "$JAR_ADMIN" /admin) || fail "admin page failed"
+echo "$page" | grep -q 'data-page="admin"' || fail "admin marker missing"
+echo "$page" | grep -q 'data-status-count="declined"' || fail "admin page is missing the status counts"
+echo "$page" | grep -q 'Northwind' && fail "admin page must not show application contents"
+page=$(html "$JAR_ADMIN" /admin/audit) || fail "audit page failed"
+echo "$page" | grep -q 'data-page="admin-audit"' || fail "audit marker missing"
+echo "$page" | grep -q 'data-audit-verify' || fail "audit page is missing the verify control"
+echo "$page" | grep -q 'data-audit-count="0"' && fail "audit page shows no events"
+echo "$page" | grep -q 'Northwind' && fail "audit page must not show application contents"
+verify=$(curl -fsS -b "$JAR_ADMIN" -X POST -H "origin: $BASE_URL" "$BASE_URL/api/admin/audit/verify") || fail "verify failed"
+echo "$verify" | grep -q '"ok":true' || fail "audit chain should verify: $verify"
+pass "admin counts and audit pages show no contents; the chain verifies"
+
 echo "SMOKE PASS"

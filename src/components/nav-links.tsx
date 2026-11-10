@@ -9,7 +9,9 @@ export function NavLinks({ links }: { links: { href: string; label: string }[] }
   return (
     <nav aria-label="Main" className="flex items-center gap-5">
       {links.map((l) => {
-        const active = pathname === l.href || pathname.startsWith(`${l.href}/`);
+        // The longest matching link wins, so /admin/audit doesn't also light up /admin.
+        const matches = (href: string) => pathname === href || pathname.startsWith(`${href}/`);
+        const active = matches(l.href) && !links.some((o) => o.href.length > l.href.length && matches(o.href));
         return (
           <Link
             key={l.href}
