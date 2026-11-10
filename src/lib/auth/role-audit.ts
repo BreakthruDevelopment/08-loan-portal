@@ -1,5 +1,5 @@
 import "server-only";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { appendAudit } from "@/lib/audit";
 import { db, schema } from "@/lib/db";
@@ -122,6 +122,29 @@ export const roleAuditAfter = createAuthMiddleware(async (ctx) => {
         action: "role.changed",
         detail: { userId: snap.userId, from: snap.from, to },
       });
+      // Someone who stops being an underwriter can no longer act on files they claimed, and nobody else can
+      // act on them while the assignment stands. Return those files to the queue, one audit row each.
+      if (snap.from === "underwriter" && to !== "underwriter") {
+        const released = await tx
+          .update(schema.application)
+          .set({
+            status: "submitted",
+            assignedUnderwriterId: null,
+            version: sql`${schema.application.version} + 1`,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(schema.application.assignedUnderwriterId, snap.userId), eq(schema.application.status, "in_review")))
+          .returning({ id: schema.application.id });
+        for (const file of released) {
+          await appendAudit(tx, {
+            actorId: actor.id,
+            actorRole: actor.role,
+            action: "application.released",
+            applicationId: file.id,
+            detail: { from: "in_review", to: "submitted", reason: "assignee_role_changed" },
+          });
+        }
+      }
     });
   } catch (err) {
     log.error("role.audit_failed", { targetUserId: snap.userId, from: snap.from, to });

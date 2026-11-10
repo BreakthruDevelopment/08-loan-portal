@@ -145,7 +145,7 @@ describe.skipIf(!url)("loan access, state machine, and audit (Postgres)", () => 
     expect(infoAudit).not.toHaveProperty("message");
     expect(JSON.stringify(infoAudit)).not.toContain("pay stub");
     const notes = await listNotes(applicant, asked.id);
-    expect(notes.some((note) => note.visibility === "applicant" && note.body.includes("pay stub"))).toBe(true);
+    expect(notes.some((note) => note.body.includes("pay stub"))).toBe(true);
 
     await expect(transitionApplication(applicant, asked.id, { to: "submitted", version: asked.version })).rejects.toMatchObject({ status: 409 });
     const replied = await transitionApplication(applicant, asked.id, {
@@ -272,8 +272,14 @@ describe.skipIf(!url)("loan access, state machine, and audit (Postgres)", () => 
     const asked = await transitionApplication(quinn, review.id, { to: "info_requested", version: review.version, message: "Context please." });
     await addNote(owner, asked.id, { body: "Here is the context.", visibility: "applicant" });
     const applicantNotes = await listNotes(owner, review.id);
-    expect(applicantNotes.every((note) => note.visibility === "applicant")).toBe(true);
-    expect((await listNotes(quinn, review.id)).map((note) => note.visibility).sort()).toEqual(["applicant", "applicant", "internal"]);
+    expect(applicantNotes.map((note) => note.body).sort()).toEqual(["Context please.", "Here is the context."]);
+    // Applicants never get account ids: only the note, when, and whether they wrote it.
+    for (const note of applicantNotes) {
+      expect(Object.keys(note).sort()).toEqual(["author", "body", "createdAt", "id"]);
+      expect(JSON.stringify(note)).not.toContain(quinn.id);
+    }
+    expect((applicantNotes as { author: string }[]).map((note) => note.author).sort()).toEqual(["underwriter", "you"]);
+    expect(((await listNotes(quinn, review.id)) as { visibility: string }[]).map((note) => note.visibility).sort()).toEqual(["applicant", "applicant", "internal"]);
     await expect(listNotes(ben, review.id)).rejects.toMatchObject({ status: 404 });
   });
 
@@ -473,7 +479,12 @@ describe.skipIf(!url)("loan access, state machine, and audit (Postgres)", () => 
     await expect(
       transitionApplication(owner, blanked.id, { to: "submitted", version: blanked.version, message: "Done." }),
     ).rejects.toMatchObject({ status: 409 });
-    const fixed = await updateApplication(owner, blanked.id, { version: blanked.version, employerName: "Northwind" });
+    // The path Codex described: clear a required numeric field while info_requested, then reply and resubmit.
+    const noAmount = await updateApplication(owner, blanked.id, { version: blanked.version, employerName: "Northwind", amountCents: null });
+    await expect(
+      transitionApplication(owner, noAmount.id, { to: "submitted", version: noAmount.version, message: "Done." }),
+    ).rejects.toMatchObject({ status: 409 });
+    const fixed = await updateApplication(owner, noAmount.id, { version: noAmount.version, amountCents: 1_500_000 });
     await expect(transitionApplication(owner, fixed.id, { to: "submitted", version: fixed.version, message: "Done." })).resolves.toMatchObject({
       status: "submitted",
     });
@@ -625,5 +636,72 @@ describe.skipIf(!url)("loan access, state machine, and audit (Postgres)", () => 
       select role from "user" where id in ${sql(events.map((event) => event.detail.userId))}
     `;
     expect(targets.map((row) => row.role).sort()).toEqual(["admin", "underwriter"]);
+  });
+
+  it("returns an underwriter's in_review files to the queue when they lose the role", async () => {
+    const { createApplication, getApplication, listQueue, transitionApplication } = await import("@/lib/applications");
+    const { addDocument } = await import("@/lib/documents");
+    const { auth } = await import("@/lib/auth");
+    const handler = auth().handler;
+    const post = (path: string, body: unknown, cookie?: string) =>
+      handler(
+        new Request(`http://localhost:3000/api/auth${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) },
+          body: JSON.stringify(body),
+        }),
+      );
+    const stamp = Date.now();
+    const signUp = async (label: string) => {
+      const email = `ln-demote-${label}-${stamp}@test.local`;
+      const res = await post("/sign-up/email", { name: label, email, password: PASSWORD });
+      expect(res.status).toBe(200);
+      return { email, id: ((await res.json()) as { user: { id: string } }).user.id };
+    };
+    const boss = await signUp("boss");
+    await sql`update "user" set role = 'admin' where id = ${boss.id}`;
+    const bossCookie = (await post("/sign-in/email", { email: boss.email, password: PASSWORD }))
+      .headers.getSetCookie().map((part) => part.split(";")[0]).join("; ");
+    const leaver = await signUp("leaver");
+    await sql`update "user" set role = 'underwriter' where id = ${leaver.id}`;
+    const leaverActor = { id: leaver.id, role: "underwriter" as const };
+
+    const submit = async () => {
+      const owner = await makeUser();
+      const row = await createApplication(owner, complete);
+      await addDocument(owner, row.id, { kind: "id", displayName: "id.pdf", bytes: DEMO_PDF });
+      await addDocument(owner, row.id, { kind: "pay_stub", displayName: "stub.png", bytes: DEMO_PNG });
+      return transitionApplication(owner, row.id, { to: "submitted", version: row.version });
+    };
+    const first = await submit();
+    const second = await submit();
+    const held1 = await transitionApplication(leaverActor, first.id, { to: "in_review", version: first.version });
+    await transitionApplication(leaverActor, second.id, { to: "in_review", version: second.version });
+    await expect(transitionApplication(quinn, held1.id, { to: "submitted", version: held1.version })).rejects.toMatchObject({ status: 403 });
+
+    expect((await post("/admin/set-role", { userId: leaver.id, role: "user" }, bossCookie)).status).toBe(200);
+    for (const id of [first.id, second.id]) {
+      const file = await getApplication(quinn, id);
+      expect(file.status).toBe("submitted");
+      expect(file.assignedUnderwriterId).toBeNull();
+      const events = await sql<{ detail: { reason?: string; from?: string; to?: string }; actor_id: string }[]>`
+        select detail, actor_id from audit_event where application_id = ${id} and action = 'application.released' order by id desc limit 1
+      `;
+      expect(events[0].actor_id).toBe(boss.id);
+      expect(events[0].detail).toMatchObject({ from: "in_review", to: "submitted", reason: "assignee_role_changed" });
+    }
+    expect((await listQueue(quinn, "new")).filter((item) => [first.id, second.id].includes(item.id))).toHaveLength(2);
+
+    // Belt and braces: a role changed behind the hook's back still leaves a file any underwriter can release.
+    const third = await submit();
+    const stale = await sql`update "user" set role = 'underwriter' where id = ${leaver.id} returning id`;
+    expect(stale).toHaveLength(1);
+    const held3 = await transitionApplication(leaverActor, third.id, { to: "in_review", version: third.version });
+    await sql`update "user" set role = 'user' where id = ${leaver.id}`;
+    expect((await listQueue(quinn, "new")).some((item) => item.id === held3.id)).toBe(true);
+    await expect(transitionApplication(quinn, held3.id, { to: "approved", version: held3.version })).rejects.toMatchObject({ status: 403 });
+    await expect(transitionApplication(quinn, held3.id, { to: "submitted", version: held3.version })).resolves.toMatchObject({
+      status: "submitted",
+    });
   });
 });

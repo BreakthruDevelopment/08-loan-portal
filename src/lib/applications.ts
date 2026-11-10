@@ -1,5 +1,5 @@
 import "server-only";
-import { and, count, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, isNull, notExists, or, sql } from "drizzle-orm";
 import { canReadApplication, contentWhere } from "@/lib/access";
 import { appendAudit, recordApplicationView } from "@/lib/audit";
 import { type Actor, ForbiddenError } from "@/lib/auth/rbac";
@@ -92,7 +92,18 @@ export async function listQueue(actor: Actor, tab: QueueTab) {
   if (actor.role !== "underwriter") throw new ForbiddenError();
   const where =
     tab === "new"
-      ? and(inArray(app.status, ["submitted", "in_review"]), isNull(app.assignedUnderwriterId))
+      ? and(
+          inArray(app.status, ["submitted", "in_review"]),
+          or(
+            isNull(app.assignedUnderwriterId),
+            notExists(
+              db()
+                .select({ one: sql`1` })
+                .from(schema.user)
+                .where(and(eq(schema.user.id, app.assignedUnderwriterId), eq(schema.user.role, "underwriter"))),
+            ),
+          ),
+        )
       : tab === "mine"
         ? and(eq(app.assignedUnderwriterId, actor.id), inArray(app.status, ["in_review", "info_requested"]))
         : inArray(app.status, ["approved", "declined"]);
@@ -220,7 +231,7 @@ export async function transitionApplication(actor: Actor, id: string, input: unk
       role: actor.role,
       isOwner: row.applicantId === actor.id,
       isAssigned: row.assignedUnderwriterId === actor.id,
-      isUnassigned: row.assignedUnderwriterId === null,
+      isUnassigned: await isOrphaned(tx, row.assignedUnderwriterId),
       fieldsComplete: fieldsComplete(asFields(row)),
       hasIdDocument: docs.some((doc) => doc.kind === "id"),
       hasIncomeDocument: docs.some((doc) => (INCOME_DOCUMENT_KINDS as readonly string[]).includes(doc.kind)),
@@ -288,6 +299,16 @@ export async function transitionApplication(actor: Actor, id: string, input: unk
     log.info("application.transition", { action, from: row.status, to: next.status, applicationId: row.id });
     return present(actor, next);
   });
+}
+
+/**
+ * No one can act on the file: nobody is assigned, or the assignee is gone or no longer an underwriter
+ * (belt and braces beside the release done when a role changes). Any underwriter may then release it.
+ */
+async function isOrphaned(tx: Tx, assigneeId: string | null): Promise<boolean> {
+  if (assigneeId === null) return true;
+  const [assignee] = await tx.select({ role: schema.user.role }).from(schema.user).where(eq(schema.user.id, assigneeId));
+  return !assignee || assignee.role !== "underwriter";
 }
 
 /** A document or an applicant note created after the latest information request. */
