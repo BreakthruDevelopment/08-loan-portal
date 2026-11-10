@@ -5,6 +5,7 @@ import { nextCookies } from "better-auth/next-js";
 import { admin } from "better-auth/plugins";
 import { db, schema } from "@/lib/db";
 import { env } from "@/lib/env";
+import { roleAuditAfter, roleAuditBefore } from "./role-audit";
 import { ac, DISABLED_AUTH_PATHS, roles } from "./permissions";
 
 function createAuth() {
@@ -40,6 +41,11 @@ function createAuth() {
     // Admins manage roles, bans and accounts but cannot impersonate or reset passwords
     // (see permissions.ts). The paths are also blocked outright, as a second layer.
     disabledPaths: DISABLED_AUTH_PATHS,
+    // Sign-up cannot choose a role. set-role accepts one known role and is audited.
+    hooks: {
+      before: roleAuditBefore,
+      after: roleAuditAfter,
+    },
     plugins: [
       admin({ ac, roles, defaultRole: "user", adminRoles: ["admin"] }),
       nextCookies(),

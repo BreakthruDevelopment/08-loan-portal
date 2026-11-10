@@ -49,4 +49,10 @@ describe("toRole", () => {
   it("reads admin from a comma-separated list", () => {
     expect(toRole("user, admin")).toBe("admin");
   });
+
+  it("lets underwriter win over user, and admin win over underwriter", () => {
+    expect(toRole("underwriter")).toBe("underwriter");
+    expect(toRole("user, underwriter")).toBe("underwriter");
+    expect(toRole("underwriter, admin")).toBe("admin");
+  });
 });

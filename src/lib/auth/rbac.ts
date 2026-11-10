@@ -4,7 +4,7 @@
  * handler calls these before touching data.
  */
 
-export const ROLES = ["user", "admin"] as const;
+export const ROLES = ["user", "underwriter", "admin"] as const;
 export type Role = (typeof ROLES)[number];
 
 export type Actor = { id: string; role: Role };
@@ -18,11 +18,17 @@ export function isRole(value: unknown): value is Role {
   return typeof value === "string" && (ROLES as readonly string[]).includes(value);
 }
 
-/** Better Auth's admin plugin can store comma-separated roles; take the strongest. */
+/**
+ * Better Auth can store a comma-separated list. Collapse it to one role so an
+ * account never acts as two: admin wins, then underwriter, otherwise user.
+ * Loan content does not use `can()` (that helper lets admin through). See access.ts.
+ */
 export function toRole(value: string | null | undefined): Role {
   if (!value) return "user";
-  const parts = value.split(",").map((p) => p.trim());
-  return parts.includes("admin") ? "admin" : "user";
+  const parts = value.split(",").map((p) => p.trim()).filter(Boolean);
+  if (parts.includes("admin")) return "admin";
+  if (parts.includes("underwriter")) return "underwriter";
+  return "user";
 }
 
 export function can(actor: Actor, action: Action, resource?: Owned): boolean {

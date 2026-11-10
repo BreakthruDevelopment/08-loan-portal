@@ -6,7 +6,7 @@ import { z } from "zod";
  */
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  APP_NAME: z.string().default("30 Apps Template"),
+  APP_NAME: z.string().default("Loan Application Portal"),
   // The public URL, e.g. https://app7.breakthruventures.ai. Sign-in callbacks,
   // cookies and CORS all derive from it, so a domain change never touches code.
   APP_URL: z.string().url().default("http://localhost:3000"),
@@ -27,6 +27,8 @@ const schema = z.object({
   // Provider call timeout. 20 s keeps AI calls inside Lambda's 29 s limit (route maxDuration is 25 s).
   AI_TIMEOUT_MS: z.coerce.number().int().positive().max(22000).default(20000),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  // App-wide document bytes cap. The spec's free-tier ceiling is 2,048 MB.
+  DOC_STORAGE_CAP_MB: z.coerce.number().int().positive().max(2048).default(2048),
 });
 
 export type Env = z.infer<typeof schema>;
