@@ -63,7 +63,7 @@ export const DECISION_CODE_LABELS: Record<DecisionCode, string> = {
   INCOMPLETE_DOCUMENTATION: "Incomplete documentation",
   SHORT_EMPLOYMENT: "Short employment history",
   UNVERIFIABLE_INFORMATION: "Information couldn't be verified",
-  OTHER: "Other (see note)",
+  OTHER: "Other",
 };
 
 export const CONTENT_TYPE_LABELS: Record<string, string> = {
