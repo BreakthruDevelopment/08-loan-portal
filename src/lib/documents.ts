@@ -21,6 +21,7 @@ import {
   MAX_BYTES_PER_APPLICATION,
   MAX_FILE_BYTES,
   MAX_FILES_PER_APPLICATION,
+  type ApplicationStatus,
   isEditableStatus,
   parseUuid,
 } from "@/lib/loan";
@@ -44,6 +45,8 @@ const PUBLIC_COLUMNS = {
 } as const;
 
 export type DocumentSummary = {
+  /** Whether the viewer can delete it now: owner, application editable, and not part of an earlier submission. */
+  deletable: boolean;
   id: string;
   applicationId: string;
   kind: DocumentKind;
@@ -53,9 +56,32 @@ export type DocumentSummary = {
   uploadedAt: Date;
 };
 
+type DeleteContext = { status: ApplicationStatus; submittedAt: Date | null };
+
+/**
+ * The delete rule, once: editable application, and a file uploaded before the latest submission is locked (the
+ * underwriter may have read it). Callers check ownership.
+ */
+function deleteRule(app_: DeleteContext, uploadedAt: Date): "ok" | "not_editable" | "submitted_file" {
+  if (!isEditableStatus(app_.status)) return "not_editable";
+  if (app_.submittedAt && uploadedAt <= app_.submittedAt) return "submitted_file";
+  return "ok";
+}
+
 export function parseDocumentKind(value: unknown): DocumentKind {
   if (typeof value === "string" && (DOCUMENT_KINDS as readonly string[]).includes(value)) return value as DocumentKind;
   throw new HttpError(400, "Choose a document type.");
+}
+
+/**
+ * Charge one upload against the applicant's hourly limit in its own committed transaction. The route calls this
+ * before it reads the body, so refused and failed attempts count and a rejected upload can't be retried for free.
+ * Throws 429 at the limit; 404 for admin and 403 for underwriters (the same answers `addDocument` gives).
+ */
+export async function chargeUpload(actor: Actor): Promise<void> {
+  if (actor.role === "admin") throw new NotFoundError();
+  if (actor.role !== "user") throw new ForbiddenError();
+  await db().transaction((tx) => consumeRate(tx, actor.id, "upload", UPLOADS_PER_HOUR, "Too many uploads. Try again later."));
 }
 
 /**
@@ -68,13 +94,16 @@ export async function addDocument(
   actor: Actor,
   applicationId: string,
   input: { kind: DocumentKind; displayName: string; bytes: Uint8Array },
+  /** `rateCharged: true` when the caller already ran `chargeUpload`, so one upload is never charged twice. */
+  opts: { rateCharged?: boolean } = {},
 ): Promise<DocumentSummary> {
   if (actor.role === "admin") throw new NotFoundError();
   if (actor.role !== "user") throw new ForbiddenError();
   const id = parseUuid(applicationId);
   const kind = parseDocumentKind(input.kind);
   const displayName = sanitizeDisplayName(input.displayName);
-  const bytes = Buffer.from(input.bytes);
+  // A view, not a copy: the caller's buffer is already a full file in memory.
+  const bytes = Buffer.from(input.bytes.buffer, input.bytes.byteOffset, input.bytes.byteLength);
   if (bytes.byteLength === 0) throw new HttpError(400, "The file is empty.");
   if (bytes.byteLength > MAX_FILE_BYTES) throw new PayloadTooLargeError(MAX_FILE_BYTES);
   const contentType = sniffContentType(bytes);
@@ -90,7 +119,7 @@ export async function addDocument(
     const [row] = await tx.select().from(app).where(and(eq(app.id, id), eq(app.applicantId, actor.id)));
     if (!row) throw new NotFoundError();
     if (!isEditableStatus(row.status)) throw new ConflictError("Documents can be changed while the application is editable.");
-    await consumeRate(tx, actor.id, "upload", UPLOADS_PER_HOUR, "Too many uploads. Try again later.");
+    if (!opts.rateCharged) await consumeRate(tx, actor.id, "upload", UPLOADS_PER_HOUR, "Too many uploads. Try again later.");
     await advisoryLock(tx, "doc-storage");
 
     const existing = await tx
@@ -126,7 +155,7 @@ export async function addDocument(
       detail: { kind, contentType, sizeBytes: bytes.byteLength },
     });
     log.info("document.uploaded", { applicationId: id, documentId: created.id, kind, sizeBytes: bytes.byteLength });
-    return created as DocumentSummary;
+    return { ...created, deletable: true } as DocumentSummary;
   });
 }
 
@@ -136,11 +165,13 @@ export async function listDocuments(actor: Actor, applicationId: string): Promis
   const id = parseUuid(applicationId);
   const [row] = await db().select().from(app).where(and(eq(app.id, id), contentWhere(actor)));
   if (!row || !canReadApplication(actor, row)) throw new NotFoundError();
-  return (await db()
+  const rows = await db()
     .select(PUBLIC_COLUMNS)
     .from(doc)
     .where(and(eq(doc.applicationId, id), isNull(doc.deletedAt)))
-    .orderBy(asc(doc.uploadedAt))) as DocumentSummary[];
+    .orderBy(asc(doc.uploadedAt));
+  const owner = actor.role === "user" && row.applicantId === actor.id;
+  return rows.map((r) => ({ ...r, deletable: owner && deleteRule(row, r.uploadedAt) === "ok" })) as DocumentSummary[];
 }
 
 export type DocumentContent = {
@@ -225,10 +256,9 @@ export async function deleteDocument(actor: Actor, documentId: string): Promise<
       .innerJoin(app, and(eq(app.id, doc.applicationId), eq(app.applicantId, doc.applicantId)))
       .where(and(eq(doc.id, id), eq(doc.applicantId, actor.id), isNull(doc.deletedAt)));
     if (!row) throw new NotFoundError();
-    if (!isEditableStatus(row.status)) throw new ConflictError("Documents can be changed while the application is editable.");
-    if (row.submittedAt && row.uploadedAt <= row.submittedAt) {
-      throw new ConflictError("This file was part of the submission and can't be removed.");
-    }
+    const rule = deleteRule(row, row.uploadedAt);
+    if (rule === "not_editable") throw new ConflictError("Documents can be changed while the application is editable.");
+    if (rule === "submitted_file") throw new ConflictError("This file was part of the submission and can't be removed.");
     await tx.update(doc).set({ deletedAt: new Date() }).where(eq(doc.id, id));
     await tx.delete(schema.documentBlob).where(eq(schema.documentBlob.documentId, id));
     await appendAudit(tx, {

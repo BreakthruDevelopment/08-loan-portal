@@ -75,6 +75,7 @@ describe.skipIf(!url)("document vault (Postgres)", () => {
   afterEach(async () => {
     current = null;
     delete process.env.DOC_STORAGE_CAP_MB;
+    delete process.env.UPLOAD_READ_TIMEOUT_MS;
     const { resetEnvCache } = await import("@/lib/env");
     resetEnvCache();
   });
@@ -108,6 +109,17 @@ describe.skipIf(!url)("document vault (Postgres)", () => {
     // The mocked session is read synchronously when the handler starts, so set it right before the call.
     current = actor;
     return POST(request, { params: Promise.resolve({ id: applicationId }) });
+  }
+
+  /** The data layer directly (no HTTP), for caps under concurrency: the route admits one upload per user at a time. */
+  async function addStatus(actor: Actor, applicationId: string, bytes: Uint8Array, kind = "id" as const, name = "id.png") {
+    const { addDocument } = await import("@/lib/documents");
+    try {
+      await addDocument(actor, applicationId, { kind, displayName: name, bytes });
+      return 201;
+    } catch (err) {
+      return (err as { status?: number }).status ?? 500;
+    }
   }
 
   async function download(actor: Actor | null, documentId: string, query = "") {
@@ -364,8 +376,7 @@ describe.skipIf(!url)("document vault (Postgres)", () => {
   it("allows 8 files per application, also under concurrency", async () => {
     const owner = await makeUser();
     const app = await draft(owner);
-    const results = await Promise.all(Array.from({ length: 14 }, (_, i) => upload(owner, app.id, { bytes: png(2048, 100 + i) })));
-    const statuses = results.map((r) => r.status).sort();
+    const statuses = (await Promise.all(Array.from({ length: 14 }, (_, i) => addStatus(owner, app.id, png(2048, 100 + i))))).sort();
     expect(statuses.filter((s) => s === 201)).toHaveLength(8);
     expect(statuses.filter((s) => s === 409)).toHaveLength(6);
     const [{ n }] = await sql`select count(*)::int as n from document where application_id = ${app.id} and deleted_at is null`;
@@ -377,9 +388,9 @@ describe.skipIf(!url)("document vault (Postgres)", () => {
   it("allows 20 MB per application, also under concurrency", async () => {
     const owner = await makeUser();
     const app = await draft(owner);
-    const results = await Promise.all(Array.from({ length: 7 }, (_, i) => upload(owner, app.id, { bytes: png(4.9 * MB, 200 + i) })));
-    expect(results.filter((r) => r.status === 201)).toHaveLength(4);
-    expect(results.filter((r) => r.status === 409)).toHaveLength(3);
+    const results = await Promise.all(Array.from({ length: 7 }, (_, i) => addStatus(owner, app.id, png(4.9 * MB, 200 + i))));
+    expect(results.filter((r) => r === 201)).toHaveLength(4);
+    expect(results.filter((r) => r === 409)).toHaveLength(3);
     const [{ total }] = await sql`select coalesce(sum(size_bytes), 0)::bigint as total from document where application_id = ${app.id}`;
     expect(Number(total)).toBeLessThanOrEqual(20 * MB);
   });
@@ -412,11 +423,10 @@ describe.skipIf(!url)("document vault (Postgres)", () => {
 
     const owners = await Promise.all(Array.from({ length: 6 }, () => makeUser()));
     const apps = await Promise.all(owners.map((o) => draft(o)));
-    const results = await Promise.all(apps.map((a, i) => upload(owners[i], a.id, { bytes: png(size, 300 + i) })));
-    expect(results.map((r) => r.status).sort()).toEqual([201, 409, 409, 409, 409, 409]);
-    const refused = results.filter((r) => r.status === 409);
-    expect(refused).toHaveLength(5);
-    expect((await refused[0].json()).error).toMatch(/storage is full/i);
+    const results = await Promise.all(apps.map((a, i) => addStatus(owners[i], a.id, png(size, 300 + i))));
+    expect([...results].sort()).toEqual([201, 409, 409, 409, 409, 409]);
+    const { addDocument } = await import("@/lib/documents");
+    await expect(addDocument(owners[0], apps[0].id, { kind: "other", displayName: "x.png", bytes: png(size, 399) })).rejects.toThrow(/storage is full/i);
     const [after] = await sql`select coalesce(sum(size_bytes), 0)::bigint as total from document where deleted_at is null`;
     expect(Number(after.total)).toBeLessThanOrEqual(capMb * MB);
 
@@ -661,7 +671,7 @@ describe.skipIf(!url)("document vault (Postgres)", () => {
     const rows = await listDocuments(owner, created.id);
     expect(rows).toHaveLength(2);
     for (const row of rows) {
-      expect(Object.keys(row).sort()).toEqual(["applicationId", "contentType", "displayName", "id", "kind", "sizeBytes", "uploadedAt"]);
+      expect(Object.keys(row).sort()).toEqual(["applicationId", "contentType", "deletable", "displayName", "id", "kind", "sizeBytes", "uploadedAt"]);
     }
     const { GET } = await import("@/app/api/applications/[id]/documents/route");
     current = owner;
@@ -696,4 +706,154 @@ describe.skipIf(!url)("document vault (Postgres)", () => {
     await expect(sql`update document_blob set bytes = ''::bytea where document_id = ${document.id}`).rejects.toThrow();
     await expect(sql`update document_blob set bytes = ${Buffer.alloc(5 * MB + 1)} where document_id = ${document.id}`).rejects.toThrow();
   });
+  // ---- in-flight caps, charging before the read, timeout ---------------------------------------------------------
+
+  /** A real upload whose body doesn't start flowing until `open()`; `pulled()` says whether anything read it. */
+  async function gatedUpload(actor: Actor, applicationId: string, opts: { bytes: Uint8Array; stall?: boolean } & Record<string, unknown>) {
+    const { POST } = await import("@/app/api/applications/[id]/documents/route");
+    const source = await uploadRequest(applicationId, { bytes: opts.bytes });
+    const payload = Buffer.from(await source.clone().arrayBuffer());
+    let pulled = false;
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          pulled = true;
+          if (opts.stall) await new Promise(() => undefined); // never sends anything
+          await gate;
+          controller.enqueue(new Uint8Array(payload));
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const request = new Request(source.url, { method: "POST", headers: source.headers, body, duplex: "half" } as RequestInit);
+    current = actor;
+    const response = POST(request, { params: Promise.resolve({ id: applicationId }) });
+    return { response, open, pulled: () => pulled };
+  }
+
+  async function waitForSlots(n: number) {
+    const { uploadSlotsInUse } = await import("@/lib/upload-slots");
+    for (let i = 0; i < 200 && uploadSlotsInUse() !== n; i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(uploadSlotsInUse()).toBe(n);
+  }
+
+  it("lets one user have one upload in flight: the rest are 429 with Retry-After, before any body is read", async () => {
+    const owner = await makeUser();
+    const app = await draft(owner);
+    const holder = await gatedUpload(owner, app.id, { bytes: png(64, 1000) });
+    await waitForSlots(1);
+
+    const extras = await Promise.all(Array.from({ length: 8 }, (_, i) => gatedUpload(owner, app.id, { bytes: png(64, 1001 + i) })));
+    const answers = await Promise.all(extras.map((e) => e.response));
+    expect(answers.map((r) => r.status)).toEqual(Array(8).fill(429));
+    expect(answers.every((r) => r.headers.get("retry-after") !== null)).toBe(true);
+    expect(extras.some((e) => e.pulled())).toBe(false);
+    // The admitted upload is the only one that gets as far as reading.
+    for (let i = 0; i < 200 && !holder.pulled(); i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(holder.pulled()).toBe(true);
+
+    holder.open();
+    expect((await holder.response).status).toBe(201);
+    await waitForSlots(0);
+    // Refused-by-slot attempts weren't charged: only the one real upload was.
+    const [{ n }] = await sql`select count(*)::int as n from rate_event where user_id = ${owner.id} and kind = 'upload'`;
+    expect(n).toBe(1);
+    expect((await upload(owner, app.id, { bytes: png(64, 1100) })).status).toBe(201);
+  });
+
+  it("lets two uploads run per process: a third user gets 503 with Retry-After before any body is read", async () => {
+    const [a, b, c] = await Promise.all([makeUser(), makeUser(), makeUser()]);
+    const [appA, appB, appC] = await Promise.all([draft(a), draft(b), draft(c)]);
+    const first = await gatedUpload(a, appA.id, { bytes: png(64, 1200) });
+    const second = await gatedUpload(b, appB.id, { bytes: png(64, 1201) });
+    await waitForSlots(2);
+
+    const refused = await Promise.all(Array.from({ length: 5 }, (_, i) => gatedUpload(c, appC.id, { bytes: png(64, 1210 + i) })));
+    const answers = await Promise.all(refused.map((r) => r.response));
+    // Several from the same user hit the per-process cap or, once one is admitted, the per-user cap; none is admitted here.
+    expect(answers.map((r) => r.status)).toEqual(Array(5).fill(503));
+    expect(answers.every((r) => r.headers.get("retry-after") !== null)).toBe(true);
+    expect(refused.some((r) => r.pulled())).toBe(false);
+
+    first.open();
+    second.open();
+    expect((await first.response).status).toBe(201);
+    expect((await second.response).status).toBe(201);
+    await waitForSlots(0);
+    expect((await upload(c, appC.id, { bytes: png(64, 1220) })).status).toBe(201);
+  });
+
+  it("releases the slot when an upload fails", async () => {
+    const owner = await makeUser();
+    const app = await draft(owner);
+    expect((await upload(owner, app.id, { name: "x.pdf", bytes: Buffer.from("<html>") })).status).toBe(415);
+    await waitForSlots(0);
+    expect((await upload(owner, "00000000-0000-4000-8000-000000000000", { bytes: png(64, 1300) })).status).toBe(404);
+    await waitForSlots(0);
+  });
+
+  it("charges the hourly limit before reading: failed attempts count, a success is charged once", async () => {
+    const owner = await makeUser();
+    const app = await draft(owner);
+    const html = Buffer.from("<html></html>");
+    for (let i = 0; i < 30; i += 1) expect((await upload(owner, app.id, { name: "id.pdf", bytes: html })).status).toBe(415);
+    const held = await gatedUpload(owner, app.id, { bytes: png(64, 1400) });
+    const res = await held.response;
+    expect(res.status).toBe(429);
+    expect(held.pulled()).toBe(false);
+    const [{ n }] = await sql`select count(*)::int as n from rate_event where user_id = ${owner.id} and kind = 'upload'`;
+    expect(n).toBe(30);
+
+    const fresh = await makeUser();
+    const freshApp = await draft(fresh);
+    expect((await upload(fresh, freshApp.id, { bytes: png(64, 1401) })).status).toBe(201);
+    const [{ one }] = await sql`select count(*)::int as one from rate_event where user_id = ${fresh.id} and kind = 'upload'`;
+    expect(one).toBe(1);
+  });
+
+  it("cuts off a body that never arrives (408) and frees the slot", async () => {
+    process.env.UPLOAD_READ_TIMEOUT_MS = "150";
+    const { resetEnvCache } = await import("@/lib/env");
+    resetEnvCache();
+    const owner = await makeUser();
+    const app = await draft(owner);
+    const started = Date.now();
+    const slow = await gatedUpload(owner, app.id, { bytes: png(64, 1500), stall: true });
+    const res = await slow.response;
+    expect(res.status).toBe(408);
+    expect(Date.now() - started).toBeLessThan(3000);
+    await waitForSlots(0);
+  });
+
+  // ---- deletable flag ---------------------------------------------------------------------------------------------
+
+  it("tells the UI which documents can be deleted", async () => {
+    const { transitionApplication } = await import("@/lib/applications");
+    const { listDocuments } = await import("@/lib/documents");
+    const owner = await makeUser();
+    const created = await draft(owner, complete);
+    const docs = await addTwo(owner, created.id);
+    expect(docs.id.deletable).toBe(true);
+    expect((await listDocuments(owner, created.id)).map((d) => d.deletable)).toEqual([true, true]);
+    const sent = await transitionApplication(owner, created.id, { to: "submitted", version: created.version });
+    expect((await listDocuments(owner, created.id)).map((d) => d.deletable)).toEqual([false, false]);
+    expect((await listDocuments(quinn, created.id)).map((d) => d.deletable)).toEqual([false, false]);
+    const claimed = await transitionApplication(quinn, created.id, { to: "in_review", version: sent.version });
+    await transitionApplication(quinn, created.id, { to: "info_requested", version: claimed.version, message: "Another, please." });
+    const extra = await (await upload(owner, created.id, { bytes: png(64, 1600), kind: "bank_statement" })).json();
+    expect(extra.document.deletable).toBe(true);
+    const rows = await listDocuments(owner, created.id);
+    expect(Object.fromEntries(rows.map((d) => [d.id, d.deletable]))).toEqual({
+      [docs.id.id]: false,
+      [docs.pay.id]: false,
+      [extra.document.id]: true,
+    });
+    // The flag and the delete rule agree.
+    expect((await remove(owner, docs.id.id)).status).toBe(409);
+    expect((await remove(owner, extra.document.id)).status).toBe(204);
+  });
+
 });

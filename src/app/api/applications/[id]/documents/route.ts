@@ -1,10 +1,12 @@
 import { z } from "zod";
 import { requireUser } from "@/lib/auth/session";
 import { requireSameOrigin } from "@/lib/csrf";
-import { addDocument, listDocuments } from "@/lib/documents";
+import { addDocument, chargeUpload, listDocuments } from "@/lib/documents";
+import { env } from "@/lib/env";
 import { HttpError, PayloadTooLargeError } from "@/lib/errors";
-import { errorResponse, readBodyCapped } from "@/lib/http";
+import { bodyOf, errorResponse, readBodyCapped } from "@/lib/http";
 import { DOCUMENT_KINDS, MAX_FILE_BYTES } from "@/lib/loan";
+import { acquireUploadSlot } from "@/lib/upload-slots";
 
 export const dynamic = "force-dynamic";
 
@@ -31,7 +33,8 @@ export async function GET(_request: Request, ctx: Ctx) {
 
 /**
  * POST /api/applications/:id/documents: multipart with `kind` and one `file`. A missing Content-Length is 411 and
- * an oversize one is 413, both before any byte is read; the read itself is capped while streaming too.
+ * an oversize one is 413, both before any byte is read; then the in-flight slot (429/503) and the hourly charge
+ * (429) are taken, still before reading. The read is capped while streaming and has a total time limit (408).
  */
 export async function POST(request: Request, ctx: Ctx) {
   try {
@@ -46,22 +49,32 @@ export async function POST(request: Request, ctx: Ctx) {
     if (!/^\d{1,12}$/.test(length.trim())) throw new HttpError(400, "Invalid Content-Length.");
     if (Number(length) > UPLOAD_BODY_LIMIT) throw new PayloadTooLargeError(UPLOAD_BODY_LIMIT);
 
-    const body = await readBodyCapped(request, UPLOAD_BODY_LIMIT);
-    let form: FormData;
+    // Before any byte is read: at most 1 upload in flight per user and 2 per process (429 / 503), each held until
+    // the response is ready, because a 5 MB upload is copied several times on its way to the database.
+    const release = acquireUploadSlot(user.id);
     try {
-      form = await new Response(new Uint8Array(body), { headers: { "content-type": contentType } }).formData();
-    } catch {
-      throw new HttpError(400, "The upload couldn't be read.");
-    }
-    if (form.getAll("file").length !== 1) throw new HttpError(400, "Send exactly one file.");
-    const fields = uploadForm.parse({ kind: form.get("kind"), file: form.get("file") });
+      // Charged now, in its own committed step, so refused and failed attempts count (and success isn't charged twice).
+      await chargeUpload(user);
+      const body = await readBodyCapped(request, UPLOAD_BODY_LIMIT, { timeoutMs: env().UPLOAD_READ_TIMEOUT_MS });
+      let form: FormData;
+      try {
+        form = await new Response(bodyOf(body), { headers: { "content-type": contentType } }).formData();
+      } catch {
+        throw new HttpError(400, "The upload couldn't be read.");
+      }
+      if (form.getAll("file").length !== 1) throw new HttpError(400, "Send exactly one file.");
+      const fields = uploadForm.parse({ kind: form.get("kind"), file: form.get("file") });
 
-    const document = await addDocument(user, id, {
-      kind: fields.kind,
-      displayName: fields.file.name,
-      bytes: new Uint8Array(await fields.file.arrayBuffer()),
-    });
-    return Response.json({ document }, { status: 201, headers: { "Cache-Control": "private, no-store" } });
+      const document = await addDocument(
+        user,
+        id,
+        { kind: fields.kind, displayName: fields.file.name, bytes: Buffer.from(await fields.file.arrayBuffer()) },
+        { rateCharged: true },
+      );
+      return Response.json({ document }, { status: 201, headers: { "Cache-Control": "private, no-store" } });
+    } finally {
+      release();
+    }
   } catch (err) {
     return errorResponse(err);
   }

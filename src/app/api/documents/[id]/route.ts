@@ -3,7 +3,7 @@ import { requireUser } from "@/lib/auth/session";
 import { requireSameOrigin } from "@/lib/csrf";
 import { downloadFilename } from "@/lib/document-rules";
 import { deleteDocument, getDocumentContent } from "@/lib/documents";
-import { errorResponse } from "@/lib/http";
+import { bodyOf, errorResponse } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +22,7 @@ export async function GET(request: Request, ctx: Ctx) {
     const { id } = await ctx.params;
     const { inline } = query.parse(Object.fromEntries(new URL(request.url).searchParams));
     const file = await getDocumentContent(user, id, { inline: inline === "1" });
-    return new Response(new Uint8Array(file.bytes), {
+    return new Response(bodyOf(file.bytes), {
       status: 200,
       headers: {
         "Content-Type": file.contentType,

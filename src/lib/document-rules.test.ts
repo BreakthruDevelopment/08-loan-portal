@@ -33,6 +33,18 @@ describe("PDF hygiene", () => {
     expect(() => assertPdfHygiene(pdf("1 0 obj<</Type/Metadata/JSON 1/JSAlike 2/Encrypted 3>>endobj"))).not.toThrow();
   });
 
+  it("keeps /URI links and ordinary actions allowed", () => {
+    expect(() => assertPdfHygiene(pdf("1 0 obj<</S/URI/URI(https://example.com)/Type/Action/GoTo 1>>endobj"))).not.toThrow();
+  });
+
+  it("finds a forbidden name far into a large file, and ignores overlong tokens", () => {
+    const filler = "A".repeat(2_000_000);
+    expect(() => assertPdfHygiene(pdf(`${filler}\n/${"x".repeat(5000)}\n1 0 obj<</S/Launch>>endobj`))).toThrowError(
+      expect.objectContaining({ status: 422 }),
+    );
+    expect(() => assertPdfHygiene(pdf(`/${"JavaScript".repeat(100)}`))).not.toThrow();
+  });
+
   it.each([
     ["/JavaScript", "1 0 obj<</S/JavaScript/JS(app.alert(1))>>endobj"],
     ["/JS", "1 0 obj<</JS (app.alert(1))>>endobj"],
@@ -44,6 +56,14 @@ describe("PDF hygiene", () => {
     ["/Encrypt", "trailer<</Encrypt 5 0 R/Root 1 0 R>>"],
     ["an escaped name", "1 0 obj<</S/Java#53cript>>endobj"],
     ["an escaped name at the very start", "1 0 obj<</#4aS(x)>>endobj"],
+    ["/Encrypt ended by NUL", "trailer<</Encrypt\u00005 0 R>>"],
+    ["/JavaScript ended by NUL then /JS", "1 0 obj<</S/JavaScript\u0000/JS(x)>>endobj"],
+    ["/JavaScript ended by form feed", "1 0 obj<</S/JavaScript\u000c(x)>>endobj"],
+    ["/JS ended by NUL", "1 0 obj<</JS\u0000(x)>>endobj"],
+    ["/SubmitForm", "1 0 obj<</S/SubmitForm/F(http://x)>>endobj"],
+    ["/GoToR", "1 0 obj<</S/GoToR/F(other.pdf)>>endobj"],
+    ["/GoToE", "1 0 obj<</S/GoToE/T 1 0 R>>endobj"],
+    ["/ImportData", "1 0 obj<</S/ImportData/F(x)>>endobj"],
   ])("refuses %s", (_label, body) => {
     expect(() => assertPdfHygiene(pdf(body))).toThrowError(expect.objectContaining({ status: 422 }));
   });
