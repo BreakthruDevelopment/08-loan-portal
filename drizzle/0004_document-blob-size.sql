@@ -1,0 +1,1 @@
+ALTER TABLE "document_blob" ADD CONSTRAINT "document_blob_size_chk" CHECK (octet_length("document_blob"."bytes") between 1 and 5242880);

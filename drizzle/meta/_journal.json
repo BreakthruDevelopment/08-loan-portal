@@ -29,6 +29,13 @@
       "when": 1794297443482,
       "tag": "0003_income-cap",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794347868530,
+      "tag": "0004_document-blob-size",
+      "breakpoints": true
     }
   ]
 }

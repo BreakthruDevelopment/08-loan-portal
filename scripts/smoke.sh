@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a running app (local, CI, or a deployed URL).
-# Signs up two applicants and one underwriter. A creates and edits a draft.
+# Signs up two applicants, an underwriter and an admin. A creates and edits a draft.
 # B and the underwriter both get 404 on that draft. A stale PATCH is 409.
+# Then the document vault: refused uploads, exact download headers, 404 for B and admin,
+# the underwriter's 404 on a draft's document and 200 after submit, delete rules.
 #   BASE_URL=http://localhost:3000 DATABASE_URL=postgres://app:app@localhost:5432/app ./scripts/smoke.sh
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:3000}"
 RUN_ID="$(date +%s)$RANDOM"
-JAR_A="$(mktemp)"; JAR_B="$(mktemp)"; JAR_U="$(mktemp)"
-trap 'rm -f "$JAR_A" "$JAR_B" "$JAR_U"' EXIT
+JAR_A="$(mktemp)"; JAR_B="$(mktemp)"; JAR_U="$(mktemp)"; JAR_ADMIN="$(mktemp)"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$JAR_A" "$JAR_B" "$JAR_U" "$JAR_ADMIN" "$WORK"' EXIT
 
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
@@ -50,21 +53,31 @@ signin() {
 EMAIL_A="smoke-a-$RUN_ID@example.test"
 EMAIL_B="smoke-b-$RUN_ID@example.test"
 EMAIL_U="smoke-uw-$RUN_ID@example.test"
+EMAIL_ADMIN="smoke-admin-$RUN_ID@example.test"
 
 signup "$JAR_A" "$EMAIL_A"
 signup "$JAR_B" "$EMAIL_B"
 signup "$JAR_U" "$EMAIL_U"
 pass "three users signed up"
 
-SMOKE_EMAIL="$EMAIL_U" node --input-type=module <<'EOF' || fail "could not grant the underwriter role"
+grant_role() {
+  SMOKE_EMAIL="$1" SMOKE_ROLE="$2" node --input-type=module <<'EOF' || fail "could not grant the $2 role"
 import postgres from "postgres";
 const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-const rows = await sql`update "user" set role = 'underwriter' where email = ${process.env.SMOKE_EMAIL} returning id`;
+const rows = await sql`update "user" set role = ${process.env.SMOKE_ROLE} where email = ${process.env.SMOKE_EMAIL} returning id`;
 await sql.end();
 if (rows.length !== 1) process.exit(1);
 EOF
+}
+grant_role "$EMAIL_U" underwriter
 signin "$JAR_U" "$EMAIL_U"
 pass "underwriter role granted and session refreshed"
+# Better Auth allows 3 sign-ups per 10 seconds per client, so the admin waits for a fresh window.
+sleep 11
+signup "$JAR_ADMIN" "$EMAIL_ADMIN"
+grant_role "$EMAIL_ADMIN" admin
+signin "$JAR_ADMIN" "$EMAIL_ADMIN"
+pass "admin signed up, granted the role, and signed in"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/applications")
 [ "$code" = "401" ] || fail "anonymous list should be 401, got $code"
@@ -106,5 +119,107 @@ for jar in "$JAR_A" "$JAR_B" "$JAR_U"; do
   [ "$code" = "404" ] || fail "risk POST on a draft should be 404, got $code"
 done
 pass "risk summary refuses anonymous, applicants and underwriters on a draft"
+
+# ---- Document vault -------------------------------------------------------------------------------------------
+DOCS="$BASE_URL/api/applications/$id/documents"
+printf '%%PDF-1.1\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' > "$WORK/id.pdf"
+# A valid 1x1 PNG.
+node -e 'process.stdout.write(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==","base64"))' > "$WORK/pay.png"
+printf '<html><script>alert(1)</script></html>' > "$WORK/fake.pdf"
+printf '%%PDF-1.4\n1 0 obj<</S/JavaScript/JS(app.alert(1))>>endobj\n%%%%EOF\n' > "$WORK/js.pdf"
+printf '%%PDF-1.4\ntrailer<</Encrypt 5 0 R>>\n%%%%EOF\n' > "$WORK/locked.pdf"
+head -c 6291456 /dev/zero > "$WORK/big.png"
+
+post_doc() { # jar, kind, file, upload-name
+  curl -s -o "$WORK/last.json" -w '%{http_code}' -b "$1" -H "origin: $BASE_URL" -F "kind=$2" -F "file=@$3;filename=$4" "$DOCS"
+}
+last_id() { node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).document.id)' "$WORK/last.json"; }
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "origin: $BASE_URL" -F kind=id -F "file=@$WORK/id.pdf;filename=id.pdf" "$DOCS")
+[ "$code" = "401" ] || fail "anonymous upload should be 401, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -F kind=id -F "file=@$WORK/id.pdf;filename=id.pdf" "$DOCS")
+[ "$code" = "403" ] || fail "upload without an Origin should be 403, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -H 'content-type: multipart/form-data; boundary=x' -H 'transfer-encoding: chunked' \
+  -H "origin: $BASE_URL" --data-binary @"$WORK/id.pdf" "$DOCS")
+[ "$code" = "411" ] || fail "upload without Content-Length should be 411, got $code"
+[ "$(post_doc "$JAR_A" id "$WORK/big.png" big.png)" = "413" ] || fail "6 MB upload should be 413"
+[ "$(post_doc "$JAR_A" id "$WORK/fake.pdf" id.pdf)" = "415" ] || fail "HTML renamed .pdf should be 415"
+[ "$(post_doc "$JAR_A" id "$WORK/pay.png" pay.jpg)" = "415" ] || fail "PNG labelled .jpg should be 415"
+[ "$(post_doc "$JAR_A" id "$WORK/js.pdf" id.pdf)" = "422" ] || fail "PDF with JavaScript should be 422"
+[ "$(post_doc "$JAR_A" id "$WORK/locked.pdf" id.pdf)" = "422" ] || fail "encrypted PDF should be 422"
+[ "$(post_doc "$JAR_B" id "$WORK/id.pdf" id.pdf)" = "404" ] || fail "applicant B upload should be 404"
+[ "$(post_doc "$JAR_U" id "$WORK/id.pdf" id.pdf)" = "403" ] || fail "underwriter upload should be 403"
+[ "$(post_doc "$JAR_ADMIN" id "$WORK/id.pdf" id.pdf)" = "404" ] || fail "admin upload should be 404"
+pass "uploads refused: anonymous, no origin, no length, 6 MB, fake PDF, mislabelled PNG, scripted and encrypted PDFs, strangers"
+
+[ "$(post_doc "$JAR_A" id "$WORK/id.pdf" '../../id card.pdf')" = "201" ] || fail "valid PDF upload should be 201: $(cat "$WORK/last.json")"
+doc_pdf=$(last_id)
+node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).document; if (d.displayName.includes("/") || d.contentType!=="application/pdf" || d.sha256) process.exit(1)' "$WORK/last.json" \
+  || fail "upload response is wrong: $(cat "$WORK/last.json")"
+[ "$(post_doc "$JAR_A" id "$WORK/id.pdf" id.pdf)" = "409" ] || fail "the same file twice should be 409"
+[ "$(post_doc "$JAR_A" pay_stub "$WORK/pay.png" pay.png)" = "201" ] || fail "valid PNG upload should be 201"
+doc_png=$(last_id)
+pass "applicant A uploaded a PDF and a PNG; a duplicate is 409"
+
+listing=$(curl -fsS -b "$JAR_A" "$DOCS") || fail "list documents failed"
+node -e 'const j=JSON.parse(process.argv[1]); if (j.documents.length!==2 || JSON.stringify(j).includes("bytes")) process.exit(1)' "$listing" || fail "bad document list: $listing"
+
+curl -s -D "$WORK/headers.txt" -o "$WORK/got.pdf" -b "$JAR_A" "$BASE_URL/api/documents/$doc_pdf" >/dev/null
+tr -d '\r' < "$WORK/headers.txt" > "$WORK/headers.clean"
+for want in \
+  "content-type: application/pdf" \
+  "content-disposition: attachment; filename=\"document-$doc_pdf.pdf\"" \
+  "x-content-type-options: nosniff" \
+  "content-security-policy: default-src 'none'; sandbox" \
+  "cache-control: private, no-store" \
+  "cross-origin-resource-policy: same-origin"; do
+  grep -qixF "$want" "$WORK/headers.clean" || fail "download header missing: $want ($(cat "$WORK/headers.clean"))"
+done
+cmp -s "$WORK/got.pdf" "$WORK/id.pdf" || fail "downloaded PDF differs from the upload"
+inline_cd=$(curl -s -D - -o /dev/null -b "$JAR_A" "$BASE_URL/api/documents/$doc_pdf?inline=1" | tr -d '\r' | grep -i '^content-disposition:')
+echo "$inline_cd" | grep -qi 'attachment' || fail "a PDF with ?inline=1 must still download: $inline_cd"
+png_cd=$(curl -s -D - -o /dev/null -b "$JAR_A" "$BASE_URL/api/documents/$doc_png?inline=1" | tr -d '\r' | grep -i '^content-disposition:')
+echo "$png_cd" | grep -qi "inline; filename=\"document-$doc_png.png\"" || fail "PNG preview header wrong: $png_cd"
+pass "download headers are exact; PDFs always download; PNG previews inline"
+
+for jar in "$JAR_B" "$JAR_ADMIN" "$JAR_U"; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/api/documents/$doc_pdf")
+  [ "$code" = "404" ] || fail "document on a draft should be 404 for B, admin and underwriter, got $code"
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/documents/$doc_pdf")
+[ "$code" = "401" ] || fail "anonymous download should be 401, got $code"
+pass "another applicant, admin and underwriter get 404 on a draft's document"
+
+# Submit: fill the required fields; the id and pay stub uploaded above satisfy the document rule.
+cur=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/applications/$id" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).application.version)))')
+filled=$(curl -fsS -b "$JAR_A" -X PATCH -H 'content-type: application/json' -H "origin: $BASE_URL" \
+  -d "{\"version\":$cur,\"amountCents\":1500000,\"termMonths\":36,\"purpose\":\"debt_consolidation\",\"employmentStatus\":\"employed\",\"employerName\":\"Northwind\",\"monthsEmployed\":24,\"annualIncomeCents\":6000000,\"monthlyHousingCents\":120000,\"monthlyDebtCents\":30000,\"creditBand\":\"good\"}" \
+  "$BASE_URL/api/applications/$id") || fail "filling the application failed"
+ver=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).application.version))' "$filled")
+
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -X DELETE -H "origin: $BASE_URL" "$BASE_URL/api/documents/$doc_png")" = "204" ] \
+  || fail "deleting a draft's document should be 204"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -X POST -H 'content-type: application/json' -H "origin: $BASE_URL" \
+  -d "{\"to\":\"submitted\",\"version\":$ver}" "$BASE_URL/api/applications/$id/transition")
+[ "$code" = "409" ] || fail "submitting without an income document should be 409, got $code"
+[ "$(post_doc "$JAR_A" pay_stub "$WORK/pay.png" pay.png)" = "201" ] || fail "re-uploading the pay stub should be 201"
+doc_png=$(last_id)
+pass "delete works on a draft and the submit rule needs an id and an income document"
+
+submitted=$(curl -fsS -b "$JAR_A" -X POST -H 'content-type: application/json' -H "origin: $BASE_URL" \
+  -d "{\"to\":\"submitted\",\"version\":$ver}" "$BASE_URL/api/applications/$id/transition") || fail "submit failed"
+node -e 'if (JSON.parse(process.argv[1]).application.status!=="submitted") process.exit(1)' "$submitted" || fail "not submitted: $submitted"
+
+code=$(curl -s -o "$WORK/uw.pdf" -w '%{http_code}' -b "$JAR_U" "$BASE_URL/api/documents/$doc_pdf")
+[ "$code" = "200" ] || fail "underwriter should get 200 after submit, got $code"
+cmp -s "$WORK/uw.pdf" "$WORK/id.pdf" || fail "underwriter's copy differs"
+for jar in "$JAR_B" "$JAR_ADMIN"; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/api/documents/$doc_pdf")
+  [ "$code" = "404" ] || fail "B and admin should still get 404 after submit, got $code"
+done
+[ "$(post_doc "$JAR_A" other "$WORK/id.pdf" again.pdf)" = "409" ] || fail "a new upload after submit should be 409"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -X DELETE -H "origin: $BASE_URL" "$BASE_URL/api/documents/$doc_png")
+[ "$code" = "409" ] || fail "deleting after submit should be 409, got $code"
+pass "underwriter downloads after submit; B and admin stay 404; uploads and deletes are locked"
 
 echo "SMOKE PASS"

@@ -239,12 +239,17 @@ export const document = pgTable(
   ],
 );
 
-export const documentBlob = pgTable("document_blob", {
-  documentId: uuid("document_id")
-    .primaryKey()
-    .references(() => document.id, { onDelete: "cascade" }),
-  bytes: bytea("bytes").notNull(),
-});
+export const documentBlob = pgTable(
+  "document_blob",
+  {
+    documentId: uuid("document_id")
+      .primaryKey()
+      .references(() => document.id, { onDelete: "cascade" }),
+    bytes: bytea("bytes").notNull(),
+  },
+  // The database refuses an empty or oversize blob even if a code path forgets the checks.
+  (t) => [check("document_blob_size_chk", sql`octet_length(${t.bytes}) between 1 and 5242880`)],
+);
 
 export const applicationNote = pgTable(
   "application_note",
