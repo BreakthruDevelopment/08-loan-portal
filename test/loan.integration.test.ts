@@ -79,15 +79,15 @@ describe.skipIf(!url)("loan access, state machine, and audit (Postgres)", () => 
     await expect(getApplication(quinn, draft.id)).rejects.toMatchObject({ status: 404 });
     await expect(listApplications(quinn)).rejects.toMatchObject({ status: 403 });
     for (const call of [
-      listApplications(admin),
-      getApplication(admin, draft.id),
-      updateApplication(admin, draft.id, { version: 1, purpose: "medical" }),
-      deleteApplication(admin, draft.id),
-      transitionApplication(admin, draft.id, { to: "withdrawn", version: 1 }),
-      listNotes(admin, draft.id),
-      addDocument(admin, draft.id, { kind: "id", displayName: "id.pdf", bytes: DEMO_PDF }),
+      () => listApplications(admin),
+      () => getApplication(admin, draft.id),
+      () => updateApplication(admin, draft.id, { version: 1, purpose: "medical" }),
+      () => deleteApplication(admin, draft.id),
+      () => transitionApplication(admin, draft.id, { to: "withdrawn", version: 1 }),
+      () => listNotes(admin, draft.id),
+      () => addDocument(admin, draft.id, { kind: "id", displayName: "id.pdf", bytes: DEMO_PDF }),
     ]) {
-      await expect(call).rejects.toMatchObject({ status: 404 });
+      await expect(call()).rejects.toMatchObject({ status: 404 });
     }
 
     const submitted = await createApplication(owner, complete);

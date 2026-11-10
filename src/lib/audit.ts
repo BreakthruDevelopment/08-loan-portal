@@ -54,7 +54,7 @@ export function assertSafeDetail(detail: unknown): Record<string, unknown> {
     }
     if (typeof value === "number" || typeof value === "boolean" || value === null) continue;
     if (Array.isArray(value)) {
-      if (value.length > 8 || value.some((item) => typeof item !== "string" || item.length > 80)) {
+      if (value.length > 16 || value.some((item) => typeof item !== "string" || item.length > 80)) {
         throw new BadRequestError("Audit detail can't include values.");
       }
       continue;

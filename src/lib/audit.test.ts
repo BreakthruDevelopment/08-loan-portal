@@ -36,6 +36,12 @@ describe("assertSafeDetail", () => {
     });
   });
 
+  it("allows a list of every application field name, but not an unbounded list", () => {
+    const names = ["amountCents", "termMonths", "purpose", "employmentStatus", "employerName", "monthsEmployed", "annualIncomeCents", "monthlyHousingCents", "monthlyDebtCents", "creditBand"];
+    expect(assertSafeDetail({ fields: names })).toEqual({ fields: names });
+    expect(() => assertSafeDetail({ fields: Array.from({ length: 17 }, (_, i) => `f${i}`) })).toThrow(BadRequestError);
+  });
+
   it("refuses amounts, names, filenames, and note text", () => {
     for (const detail of [
       { amountCents: 100 },
