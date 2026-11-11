@@ -7,15 +7,27 @@ permissions:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      - name: Diagnose
+        run: |
+          for h in app4.breakthruventures.ai app8.breakthruventures.ai; do
+            echo "== $h"; dig +short A "$h"; dig +short CNAME "$h"
+            curl -sS -m 20 -o /dev/null -w 'http %{http_code} -> %{redirect_url}\n' "http://$h/" || true
+            curl -sS -m 20 -o /dev/null -w 'https %{http_code}\n' "https://$h/api/health" || true
+            echo | timeout 20 openssl s_client -connect "$h:443" -servername "$h" 2>/dev/null | openssl x509 -noout -subject -issuer -dates 2>/dev/null || echo "no cert"
+          done
       - name: Health
         run: |
           url="$(head -n1 .github/live-smoke-url | tr -d '[:space:]')"
           echo "url=$url" >> "$GITHUB_ENV"
-          for i in $(seq 1 12); do curl -sS -m 60 "$url/api/health" && break; sleep 10; done; echo
-      - name: Smoke
-        run: BASE_URL="$url" bash scripts/smoke.sh
+          for i in $(seq 1 30); do curl -fsS -m 30 "$url/api/health" && exit 0; sleep 20; done; exit 1
+      - name: Public checks
+        # The full smoke grants the underwriter role through DATABASE_URL, which a live check doesn't have.
+        run: |
+          set -e
+          for p in / /sign-in; do curl -fsS "$url$p" | grep -q 'Explore breakthruventures.ai' && echo "ok $p"; done
+          for p in /dashboard /admin; do c=$(curl -s -o /dev/null -w '%{http_code}' "$url$p"); echo "$p $c"; [ "$c" = 307 ]; done
