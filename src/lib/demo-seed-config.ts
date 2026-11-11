@@ -20,20 +20,27 @@ const PRODUCTION_DB_HOST_SUFFIXES = [
 ];
 
 /**
- * Host checks only. The admin button calls this so a production origin is refused
- * even when DEMO_SEED is unset. The CLI also requires DEMO_SEED and DEMO_PASSWORD
- * via `demoSeedConfig`.
+ * Host checks only; the CLI also requires DEMO_SEED and DEMO_PASSWORD via `demoSeedConfig`.
+ *
+ * The CLI runs from anywhere with whatever environment it was handed, so it refuses every production
+ * origin and database (`ownApp` false). The admin button runs inside the app, where APP_URL and
+ * DATABASE_URL are the app's own, so it passes `ownApp: true`: the configured APP_URL host and the
+ * database this process is already connected to are allowed (that is what makes the demo work on the
+ * live site). It still needs a valid APP_URL and a DATABASE_URL we can read to a single host.
  */
-export function assertDemoTargetAllowed(values: Record<string, string | undefined> = process.env) {
+export function assertDemoTargetAllowed(
+  values: Record<string, string | undefined> = process.env,
+  { ownApp = false }: { ownApp?: boolean } = {},
+) {
   const parsedUrl = z.string().url().safeParse(values.APP_URL);
   if (!parsedUrl.success) throw new Error("Demo seed refused: set APP_URL to a valid URL.");
   const appUrl = parsedUrl.data;
   const hostname = normalizeHost(new URL(appUrl).hostname);
-  if (PRODUCTION_APP_HOSTS.some((h) => hostname === h || hostname.endsWith(`.${h}`))) {
+  if (!ownApp && PRODUCTION_APP_HOSTS.some((h) => hostname === h || hostname.endsWith(`.${h}`))) {
     throw new Error("Demo seed refused: APP_URL is a production host.");
   }
   // Cloud SQL sockets (`?host=/cloudsql/project:region:instance`) are the Google Cloud production database.
-  if (values.DATABASE_URL && /(\/|%2f)cloudsql(\/|%2f)/i.test(values.DATABASE_URL)) {
+  if (!ownApp && values.DATABASE_URL && /(\/|%2f)cloudsql(\/|%2f)/i.test(values.DATABASE_URL)) {
     throw new Error("Demo seed refused: DATABASE_URL is a production database host.");
   }
   // A URL we can't read is a URL we can't vet: an unencoded # or / in the password, a multi-host list, a typo.
@@ -42,7 +49,7 @@ export function assertDemoTargetAllowed(values: Record<string, string | undefine
     throw new Error("Demo seed refused: DATABASE_URL can't be parsed to a single host (percent-encode special characters in the password).");
   }
   // "postgres" is the compose service name on the Oracle VM, i.e. the production database.
-  if (dbHost === "postgres" || (dbHost && PRODUCTION_DB_HOST_SUFFIXES.some((s) => dbHost.endsWith(s)))) {
+  if (!ownApp && (dbHost === "postgres" || (dbHost && PRODUCTION_DB_HOST_SUFFIXES.some((s) => dbHost.endsWith(s))))) {
     throw new Error("Demo seed refused: DATABASE_URL is a production database host.");
   }
   return { appUrl };

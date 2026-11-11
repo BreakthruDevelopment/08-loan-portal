@@ -14,7 +14,7 @@ export async function POST(request: Request) {
     const user = await requireRole("admin");
     requireSameOrigin(request);
     try {
-      assertDemoTargetAllowed();
+      assertDemoTargetAllowed(process.env, { ownApp: true });
     } catch (err) {
       throw new ForbiddenError(err instanceof Error ? err.message : "Demo seed refused.");
     }

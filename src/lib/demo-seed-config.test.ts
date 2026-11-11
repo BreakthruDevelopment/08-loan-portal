@@ -13,6 +13,29 @@ describe("assertDemoTargetAllowed", () => {
   });
 });
 
+describe("assertDemoTargetAllowed as the app's own admin button (ownApp)", () => {
+  const own = { ownApp: true };
+
+  it("allows the app's own configured production host and database", () => {
+    for (const APP_URL of ["https://app8.breakthruventures.ai", "https://svc-abc-uc.a.run.app", "http://1-2-3-4.sslip.io"]) {
+      expect(assertDemoTargetAllowed({ APP_URL, DATABASE_URL: "postgres://u:p@postgres:5432/app" }, own).appUrl).toBe(APP_URL);
+    }
+    expect(() => assertDemoTargetAllowed({ APP_URL: "https://x.example.com", DATABASE_URL: "postgres://u:p@db.abc.us-east-1.rds.amazonaws.com/app" }, own)).not.toThrow();
+  });
+
+  it("still needs a valid APP_URL and a DATABASE_URL it can read", () => {
+    expect(() => assertDemoTargetAllowed({ APP_URL: "nope" }, own)).toThrow(/valid URL/);
+    expect(() => assertDemoTargetAllowed({ APP_URL: "https://app8.breakthruventures.ai", DATABASE_URL: "postgres://u:p@h1:5432,h2:5432/app" }, own)).toThrow(/DATABASE_URL/);
+  });
+
+  it("does not loosen the CLI: the default still refuses the same host and database", () => {
+    const env = { APP_URL: "https://app8.breakthruventures.ai", DATABASE_URL: "postgres://u:p@postgres:5432/app" };
+    expect(() => assertDemoTargetAllowed(env)).toThrow(/production host/);
+    expect(() => demoSeedConfig({ ...ok, ...env })).toThrow(/production host/);
+    expect(() => demoSeedConfig({ ...ok, APP_URL: "http://localhost:3000", DATABASE_URL: env.DATABASE_URL })).toThrow(/production database/);
+  });
+});
+
 describe("demoSeedConfig", () => {
   it("accepts a local app and database", () => {
     expect(demoSeedConfig(ok)).toEqual({ appUrl: "http://localhost:3000", password: "a-long-demo-password" });
