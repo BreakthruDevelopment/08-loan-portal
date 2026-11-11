@@ -181,8 +181,8 @@ underwriter role.
 - **Shared database superuser.** Every Oracle app connects as the `postgres` superuser with one password, so another
   Oracle app could read these tables, and a superuser can drop the audit triggers. The hash chain is what makes such
   an edit detectable.
-- **Demo loader refuses on the live site.** **Load demo workspace** calls a guard that refuses any
-  `*.breakthruventures.ai` host, so it only works locally or on a non-production host.
+- **Demo loader.** **Load demo workspace** (admin only, same-origin) runs against the app's own `APP_URL` and database, so it
+  works on the live site. The `seed-demo` CLI still refuses every production host and database.
 - **Live checks are partial.** Live smoke checks health and the public pages only. The full `scripts/smoke.sh`
   needs database access to grant the underwriter role, which a live check doesn't have.
 - Out of scope: credit bureau pulls, identity verification, SSN or date of birth (never collected), e-signatures,

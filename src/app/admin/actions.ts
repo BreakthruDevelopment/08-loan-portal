@@ -16,7 +16,7 @@ export async function loadDemoAction(prev: DemoActionState): Promise<DemoActionS
   try {
     const user = await requireRole("admin");
     try {
-      assertDemoTargetAllowed();
+      assertDemoTargetAllowed(process.env, { ownApp: true });
     } catch (err) {
       throw new ForbiddenError(err instanceof Error ? err.message : "Demo seed refused.");
     }
