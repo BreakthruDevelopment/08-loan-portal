@@ -167,8 +167,9 @@ impersonation, set-password, set-email and session listing from admins, and thos
 **Tests.** `test/loan.integration.test.ts`, `test/documents.integration.test.ts` and
 `test/risk.integration.test.ts` cover the access rules per role, the state machine, version conflicts, uploads and
 downloads, audit rows and chain verification, role changes, and the risk route. `test/admin-permissions.integration.test.ts`
-covers admin limits. `scripts/smoke.sh` runs the cross-role checks over HTTP; it needs `DATABASE_URL` to grant the
-underwriter role.
+covers admin limits. `scripts/smoke.sh` runs the cross-role checks over HTTP in two modes: CI mode (needs
+`DATABASE_URL` to promote throwaway users) and live mode (signs in as pre-seeded accounts, no database access).
+See "Known limits" below.
 
 ## Known limits
 
@@ -183,8 +184,15 @@ underwriter role.
   an edit detectable.
 - **Demo loader.** **Load demo workspace** (admin only, same-origin) runs against the app's own `APP_URL` and database, so it
   works on the live site. The `seed-demo` CLI still refuses every production host and database.
-- **Live checks are partial.** Live smoke checks health and the public pages only. The full `scripts/smoke.sh`
-  needs database access to grant the underwriter role, which a live check doesn't have.
+- **Live smoke needs permanent accounts.** `scripts/smoke.sh` has two modes. **CI mode** (the four `SMOKE_*`
+  variables unset) signs up throwaway users and promotes them with a database write, so it needs `DATABASE_URL`.
+  **Live mode** (`SMOKE_ADMIN_EMAIL`, `SMOKE_ADMIN_PASSWORD`, `SMOKE_UW_EMAIL`, `SMOKE_UW_PASSWORD` all set) signs in
+  as pre-seeded admin and underwriter accounts and never touches the database; the full vault and role checks run
+  against the deployed app. Setting only some of the four fails fast. Seed the accounts with `pnpm db:seed`
+  (`SEED_ADMIN_*` and `SEED_UW_*`); the **Live smoke** workflow (manual, `base_url` input) passes the four values
+  from repo secrets and never receives `DATABASE_URL`. Each live run leaves two throwaway applicants, one declined
+  application with its documents, two sessions on the permanent accounts and some audit events (nothing is
+  deleted), and it needs room under `DOC_STORAGE_CAP_MB`: a full document store makes the upload step return 409.
 - Out of scope: credit bureau pulls, identity verification, SSN or date of birth (never collected), e-signatures,
   pricing or APR offers, adverse-action letters (reason codes are stored so one could be generated), email
   notifications, co-applicants, business loans, OCR and retention jobs.
