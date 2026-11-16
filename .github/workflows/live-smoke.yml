@@ -1,0 +1,41 @@
+name: Live smoke
+
+# Runs scripts/smoke.sh against a deployed app using the permanent admin and underwriter accounts
+# (seeded with scripts/seed.mts). It never receives DATABASE_URL: production's database is not reachable
+# from CI and this workflow must not be given it.
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: App URL to test
+        required: true
+        default: https://app8.breakthruventures.ai
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Live smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Smoke test (live mode)
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          SMOKE_ADMIN_EMAIL: ${{ secrets.SMOKE_ADMIN_EMAIL }}
+          SMOKE_ADMIN_PASSWORD: ${{ secrets.SMOKE_ADMIN_PASSWORD }}
+          SMOKE_UW_EMAIL: ${{ secrets.SMOKE_UW_EMAIL }}
+          SMOKE_UW_PASSWORD: ${{ secrets.SMOKE_UW_PASSWORD }}
+        run: bash scripts/smoke.sh

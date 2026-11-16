@@ -4,7 +4,15 @@
 # B and the underwriter both get 404 on that draft. A stale PATCH is 409.
 # Then the document vault: refused uploads, exact download headers, 404 for B and admin,
 # the underwriter's 404 on a draft's document and 200 after submit, delete rules.
-#   BASE_URL=http://localhost:3000 DATABASE_URL=postgres://app:app@localhost:5432/app ./scripts/smoke.sh
+#
+# Two modes, one script:
+#   CI mode (default): signs up throwaway users and promotes them with a direct database write.
+#     BASE_URL=http://localhost:3000 DATABASE_URL=postgres://app:app@localhost:5432/app ./scripts/smoke.sh
+#   Live mode: when SMOKE_ADMIN_EMAIL, SMOKE_ADMIN_PASSWORD, SMOKE_UW_EMAIL and SMOKE_UW_PASSWORD are all set,
+#     signs in as those permanent pre-seeded accounts (see scripts/seed.mts). DATABASE_URL is never used (it is
+#     unset below). Applicants A and B are still throwaway sign-ups, and every assertion is scoped to the
+#     application this run creates, so the script can run repeatedly against the same deployment.
+#     BASE_URL=https://app8.breakthruventures.ai SMOKE_ADMIN_EMAIL=... ./scripts/smoke.sh
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:3000}"
@@ -16,8 +24,26 @@ trap 'rm -rf "$JAR_A" "$JAR_B" "$JAR_U" "$JAR_ADMIN" "$WORK"' EXIT
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 
-if [ -z "${DATABASE_URL:-}" ]; then
-  fail "DATABASE_URL is required to grant the underwriter role"
+live_vars=(SMOKE_ADMIN_EMAIL SMOKE_ADMIN_PASSWORD SMOKE_UW_EMAIL SMOKE_UW_PASSWORD)
+set_vars=(); missing_vars=()
+for v in "${live_vars[@]}"; do
+  if [ -n "${!v:-}" ]; then set_vars+=("$v"); else missing_vars+=("$v"); fi
+done
+if [ "${#set_vars[@]}" -eq 0 ]; then
+  LIVE=0
+elif [ "${#missing_vars[@]}" -eq 0 ]; then
+  LIVE=1
+else
+  fail "live mode is half-configured; missing: ${missing_vars[*]} (set all four SMOKE_* variables, or none for CI mode)"
+fi
+
+if [ "$LIVE" = "1" ]; then
+  # Live mode never touches the database, so make sure nothing below can.
+  unset DATABASE_URL
+  echo "mode: live (permanent admin and underwriter accounts; no database access)"
+else
+  [ -n "${DATABASE_URL:-}" ] || fail "DATABASE_URL is required in CI mode to grant the underwriter and admin roles"
+  echo "mode: ci (throwaway users promoted through DATABASE_URL)"
 fi
 
 health=$(curl -fsS "$BASE_URL/api/health") || fail "health endpoint unreachable"
@@ -37,10 +63,16 @@ done
 pass "signed-out dashboard and admin redirect"
 
 signup() {
-  local jar=$1 email=$2
-  curl -fsS -c "$jar" -b "$jar" -H 'content-type: application/json' -H "origin: $BASE_URL" \
-    -d "{\"email\":\"$email\",\"password\":\"smoke-test-password-1\",\"name\":\"Smoke\"}" \
-    "$BASE_URL/api/auth/sign-up/email" >/dev/null || fail "sign-up failed for $email"
+  local jar=$1 email=$2 code attempt
+  # Better Auth rate-limits sign-ups (3 per 10 s); back-to-back runs can hit a 429, so wait it out once.
+  for attempt in 1 2; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -c "$jar" -b "$jar" -H 'content-type: application/json' -H "origin: $BASE_URL" \
+      -d "{\"email\":\"$email\",\"password\":\"smoke-test-password-1\",\"name\":\"Smoke\"}" \
+      "$BASE_URL/api/auth/sign-up/email")
+    if [ "$code" = "429" ] && [ "$attempt" = "1" ]; then sleep 11; continue; fi
+    break
+  done
+  [ "$code" = "200" ] || fail "sign-up failed for $email (HTTP $code)"
 }
 
 signin() {
@@ -50,34 +82,71 @@ signin() {
     "$BASE_URL/api/auth/sign-in/email" >/dev/null || fail "sign-in failed for $email"
 }
 
+# Sign in with an existing account. Credentials come from the environment and go to curl on stdin, so they
+# never appear in a process list or in output. Waits out Better Auth's 429 once.
+signin_existing() { # jar, label, email-var, password-var
+  local jar=$1 label=$2 code attempt
+  for attempt in 1 2; do
+    code=$(CRED_EMAIL="${!3}" CRED_PASSWORD="${!4}" node -e 'process.stdout.write(JSON.stringify({email:process.env.CRED_EMAIL,password:process.env.CRED_PASSWORD}))' \
+      | curl -s -o /dev/null -w '%{http_code}' -c "$jar" -b "$jar" -H 'content-type: application/json' -H "origin: $BASE_URL" \
+        --data-binary @- "$BASE_URL/api/auth/sign-in/email")
+    if [ "$code" = "429" ] && [ "$attempt" = "1" ]; then sleep 11; continue; fi
+    break
+  done
+  [ "$code" = "200" ] || fail "sign-in as the permanent $label account failed (HTTP $code); check the $3 and $4 secrets and that the account is seeded"
+}
+
+# Assert a signed-in jar really holds a role by opening a page only that role can open.
+assert_role_page() { # jar, label, path, marker
+  local code
+  code=$(curl -s -o "$WORK/role.html" -w '%{http_code}' -b "$1" "$BASE_URL$3") || fail "could not request $3"
+  [ "$code" = "200" ] || fail "the $2 account must be able to open $3 (got HTTP $code); it is missing the $2 role or its session did not start"
+  grep -q "$4" "$WORK/role.html" || fail "the $2 account got HTTP 200 on $3 but not the expected page ($4)"
+}
+
 EMAIL_A="smoke-a-$RUN_ID@example.test"
 EMAIL_B="smoke-b-$RUN_ID@example.test"
-EMAIL_U="smoke-uw-$RUN_ID@example.test"
-EMAIL_ADMIN="smoke-admin-$RUN_ID@example.test"
 
-signup "$JAR_A" "$EMAIL_A"
-signup "$JAR_B" "$EMAIL_B"
-signup "$JAR_U" "$EMAIL_U"
-pass "three users signed up"
+if [ "$LIVE" = "1" ]; then
+  signup "$JAR_A" "$EMAIL_A"
+  signup "$JAR_B" "$EMAIL_B"
+  pass "two throwaway applicants signed up"
+  signin_existing "$JAR_U" underwriter SMOKE_UW_EMAIL SMOKE_UW_PASSWORD
+  signin_existing "$JAR_ADMIN" admin SMOKE_ADMIN_EMAIL SMOKE_ADMIN_PASSWORD
+  pass "signed in as the permanent underwriter and admin accounts"
+else
+  EMAIL_U="smoke-uw-$RUN_ID@example.test"
+  EMAIL_ADMIN="smoke-admin-$RUN_ID@example.test"
 
-grant_role() {
-  SMOKE_EMAIL="$1" SMOKE_ROLE="$2" node --input-type=module <<'EOF' || fail "could not grant the $2 role"
+  signup "$JAR_A" "$EMAIL_A"
+  signup "$JAR_B" "$EMAIL_B"
+  signup "$JAR_U" "$EMAIL_U"
+  pass "three users signed up"
+
+  grant_role() {
+    SMOKE_EMAIL="$1" SMOKE_ROLE="$2" node --input-type=module <<'EOF' || fail "could not grant the $2 role"
 import postgres from "postgres";
 const sql = postgres(process.env.DATABASE_URL, { max: 1 });
 const rows = await sql`update "user" set role = ${process.env.SMOKE_ROLE} where email = ${process.env.SMOKE_EMAIL} returning id`;
 await sql.end();
 if (rows.length !== 1) process.exit(1);
 EOF
-}
-grant_role "$EMAIL_U" underwriter
-signin "$JAR_U" "$EMAIL_U"
-pass "underwriter role granted and session refreshed"
-# Better Auth allows 3 sign-ups per 10 seconds per client, so the admin waits for a fresh window.
-sleep 11
-signup "$JAR_ADMIN" "$EMAIL_ADMIN"
-grant_role "$EMAIL_ADMIN" admin
-signin "$JAR_ADMIN" "$EMAIL_ADMIN"
-pass "admin signed up, granted the role, and signed in"
+  }
+  grant_role "$EMAIL_U" underwriter
+  signin "$JAR_U" "$EMAIL_U"
+  pass "underwriter role granted and session refreshed"
+  # Better Auth allows 3 sign-ups per 10 seconds per client, so the admin waits for a fresh window.
+  sleep 11
+  signup "$JAR_ADMIN" "$EMAIL_ADMIN"
+  grant_role "$EMAIL_ADMIN" admin
+  signin "$JAR_ADMIN" "$EMAIL_ADMIN"
+  pass "admin signed up, granted the role, and signed in"
+fi
+
+# Never rely on a role we did not just prove: a page only that role can open must open, in both modes.
+assert_role_page "$JAR_U" underwriter /queue 'data-page="queue"'
+assert_role_page "$JAR_ADMIN" admin /admin 'data-page="admin"'
+pass "the underwriter and admin sessions hold their roles"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/applications")
 [ "$code" = "401" ] || fail "anonymous list should be 401, got $code"

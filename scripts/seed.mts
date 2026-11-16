@@ -1,7 +1,9 @@
 /**
- * Creates a demo admin and a demo user so a fresh deploy has something to show.
+ * Creates a demo admin, a demo user and a demo underwriter so a fresh deploy has something to show.
  * Passwords come from env, never from the repo:
- *   SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD, SEED_USER_EMAIL, SEED_USER_PASSWORD
+ *   SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD, SEED_USER_EMAIL, SEED_USER_PASSWORD,
+ *   SEED_UW_EMAIL, SEED_UW_PASSWORD
+ * The admin and underwriter accounts are also what the live smoke test signs in as.
  */
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -14,6 +16,7 @@ if (!DATABASE_URL) throw new Error("DATABASE_URL is not set");
 const accounts = [
   { email: process.env.SEED_ADMIN_EMAIL, password: process.env.SEED_ADMIN_PASSWORD, name: "Demo Admin", role: "admin" },
   { email: process.env.SEED_USER_EMAIL, password: process.env.SEED_USER_PASSWORD, name: "Demo User", role: "user" },
+  { email: process.env.SEED_UW_EMAIL, password: process.env.SEED_UW_PASSWORD, name: "Demo Underwriter", role: "underwriter" },
 ].filter((a): a is { email: string; password: string; name: string; role: string } => Boolean(a.email && a.password));
 
 if (accounts.length === 0) {
